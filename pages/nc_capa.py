@@ -47,7 +47,7 @@ def show(audit_type: str):
                 rows.append({
                     "Ref":        f.get("finding_ref", "—"),
                     "Clause":     f.get("clause_ref", "—"),
-                    "Details":    (f.get("details", "") or "")[:70] + "…",
+                    "Details":    f.get("details", "") or "",
                     "Owner":      owner,
                     "Target":     format_date(f.get("target_date")),
                     "Closed":     format_date(f.get("closing_date")),
@@ -55,7 +55,7 @@ def show(audit_type: str):
                     "_id":        f["id"],
                 })
             df = pd.DataFrame(rows)
-            st.dataframe(df.drop(columns=["_id"]), use_container_width=True, hide_index=True)
+            st.dataframe(df.drop(columns=["_id"]), use_container_width=True, hide_index=True, column_config={"Details": st.column_config.TextColumn("Details", width="large")})
 
             overdue = [f for f in findings if f.get("target_date") and
                        date.fromisoformat(f["target_date"]) < date.today() and
@@ -67,7 +67,7 @@ def show(audit_type: str):
         if findings:
             st.markdown("---")
             st.markdown("#### View Full Finding Details")
-            opts = {f"{f.get('finding_ref','—')} — {(f.get('details','') or '')[:50]}": f for f in findings}
+            opts = {f"{f.get('finding_ref','—')} — {f.get('details','') or ''}": f for f in findings}
             sel_label = st.selectbox("Select finding", list(opts.keys()), key=f"view_sel_{audit_type}")
             sel = opts[sel_label]
 
