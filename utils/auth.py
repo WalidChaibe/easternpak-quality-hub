@@ -1,5 +1,4 @@
 import os
-import requests
 import streamlit as st
 from utils.supabase_client import get_supabase
 
@@ -22,40 +21,17 @@ WRITE_ROLES = {"admin","quality_manager","quality_engineer"}
 
 def login(email: str, password: str) -> bool:
     try:
-        url = os.environ.get("SUPABASE_URL") or st.secrets["SUPABASE_URL"]
-        key = os.environ.get("SUPABASE_ANON_KEY") or st.secrets["SUPABASE_ANON_KEY"]
+        sb = get_supabase()
 
-        # Strip trailing slash if present
-        url = url.rstrip("/")
+        # Check password directly against profiles table using pgcrypto
+        res = sb.rpc("verify_login", {"p_email": email, "p_password": password}).execute()
 
-        # Sign in via Supabase Auth REST API
-        res = requests.post(
-            f"{url}/auth/v1/token?grant_type=password",
-            headers={
-                "apikey": key,
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-            },
-            json={"email": email, "password": password},
-            timeout=10,
-        )
-
-        if res.status_code != 200:
-            err = res.json()
-            st.error(f"Login failed ({res.status_code}): {err.get('error_description') or err.get('msg') or res.text}")
+        if not res.data:
+            st.error("Invalid email or password.")
             return False
 
-        data         = res.json()
-        access_token = data["access_token"]
-        user_id      = data["user"]["id"]
-
-        # Fetch profile
-        sb      = get_supabase()
-        profile = sb.table("profiles").select("*").eq("id", user_id).single().execute()
-
-        st.session_state["user"]         = data["user"]
-        st.session_state["access_token"] = access_token
-        st.session_state["profile"]      = profile.data
+        profile = res.data[0]
+        st.session_state["profile"] = profile
         return True
 
     except Exception as e:
@@ -64,7 +40,7 @@ def login(email: str, password: str) -> bool:
 
 
 def logout():
-    for k in ["user", "access_token", "profile", "session"]:
+    for k in ["profile"]:
         st.session_state.pop(k, None)
     st.rerun()
 
