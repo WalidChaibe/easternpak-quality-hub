@@ -25,26 +25,32 @@ def login(email: str, password: str) -> bool:
         url = os.environ.get("SUPABASE_URL") or st.secrets["SUPABASE_URL"]
         key = os.environ.get("SUPABASE_ANON_KEY") or st.secrets["SUPABASE_ANON_KEY"]
 
-        # Sign in via Supabase Auth REST API directly
+        # Strip trailing slash if present
+        url = url.rstrip("/")
+
+        # Sign in via Supabase Auth REST API
         res = requests.post(
             f"{url}/auth/v1/token?grant_type=password",
             headers={
                 "apikey": key,
+                "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
             },
             json={"email": email, "password": password},
+            timeout=10,
         )
 
         if res.status_code != 200:
-            st.error(f"Login failed: {res.json().get('error_description', 'Invalid email or password.')}")
+            err = res.json()
+            st.error(f"Login failed ({res.status_code}): {err.get('error_description') or err.get('msg') or res.text}")
             return False
 
-        data = res.json()
+        data         = res.json()
         access_token = data["access_token"]
         user_id      = data["user"]["id"]
 
-        # Fetch profile using the access token
-        sb = get_supabase()
+        # Fetch profile
+        sb      = get_supabase()
         profile = sb.table("profiles").select("*").eq("id", user_id).single().execute()
 
         st.session_state["user"]         = data["user"]
@@ -53,13 +59,13 @@ def login(email: str, password: str) -> bool:
         return True
 
     except Exception as e:
-        st.error(f"Login failed: {e}")
+        st.error(f"Login error: {e}")
     return False
 
 
 def logout():
-    for key in ["user", "access_token", "profile", "session"]:
-        st.session_state.pop(key, None)
+    for k in ["user", "access_token", "profile", "session"]:
+        st.session_state.pop(k, None)
     st.rerun()
 
 
@@ -77,7 +83,6 @@ def can_write() -> bool:
 
 
 def require_auth():
-    """Call at top of every page. Redirects to login if not authenticated."""
     if "profile" not in st.session_state:
         st.warning("Please log in to access this page.")
         st.stop()
