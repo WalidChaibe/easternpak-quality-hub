@@ -75,7 +75,7 @@ def show():
             is_overdue = target and date.fromisoformat(target) < date.today()
             badge = "🔴" if is_overdue else "🟡"
 
-            with st.expander(f"{badge} [{f.get('audit_type','')}] {f.get('finding_ref','—')} — {(f.get('details','') or '')[:60]}…"):
+            with st.expander(f"{badge} [{f.get('audit_type','')}] {f.get('finding_ref','—')} — {f.get('details','') or ''}…"):
                 c1, c2 = st.columns(2)
                 with c1:
                     st.markdown(f"**Audit:** {f.get('audit_ref','—')}")
@@ -108,7 +108,7 @@ def show():
                 is_overdue = target and date.fromisoformat(target) < date.today()
                 badge  = "🔴" if is_overdue else "🟡"
 
-                with st.expander(f"{badge} [{f.get('audit_type','')}] {f.get('finding_ref','—')} — {(f.get('details','') or '')[:60]}… | Owner: {owner}"):
+                with st.expander(f"{badge} [{f.get('audit_type','')}] {f.get('finding_ref','—')} — {f.get('details','') or ''}… | Owner: {owner}"):
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown(f"**Audit:** {f.get('audit_ref','—')}")
