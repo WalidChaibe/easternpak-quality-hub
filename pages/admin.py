@@ -1,8 +1,20 @@
+import os
 import streamlit as st
 import pandas as pd
+from supabase import create_client
 from utils.auth import require_auth, get_role
 from utils.supabase_client import get_supabase
 from utils.helpers import get_departments
+
+
+def get_admin_client():
+    """Service role client — bypasses RLS, used only for user management."""
+    url = os.environ.get("SUPABASE_URL") or st.secrets["SUPABASE_URL"]
+    key = os.environ.get("SUPABASE_SERVICE_KEY") or st.secrets.get("SUPABASE_SERVICE_KEY")
+    if not key:
+        st.error("SUPABASE_SERVICE_KEY not set in secrets. Please add it in Streamlit settings.")
+        st.stop()
+    return create_client(url, key)
 
 
 def show():
@@ -13,11 +25,11 @@ def show():
         st.stop()
 
     st.title("⚙️ User Management")
-    st.caption("Add users, assign roles and departments. Users receive a Supabase invite email.")
+    st.caption("Add users, assign roles and departments.")
 
     sb = get_supabase()
 
-    tab_list, tab_add = st.tabs(["👥 All Users", "➕ Invite User"])
+    tab_list, tab_add = st.tabs(["👥 All Users", "➕ Add User"])
 
     with tab_list:
         res = sb.table("profiles").select("*, departments(name)").order("full_name").execute()
@@ -29,59 +41,55 @@ def show():
             rows = []
             for u in users:
                 rows.append({
-                    "Name":       u.get("full_name",""),
-                    "Email":      u.get("email",""),
-                    "Role":       u.get("role",""),
-                    "Department": (u.get("departments") or {}).get("name","—"),
+                    "Name":       u.get("full_name", ""),
+                    "Email":      u.get("email", ""),
+                    "Role":       u.get("role", ""),
+                    "Department": (u.get("departments") or {}).get("name", "—"),
                     "Active":     "✓" if u.get("is_active") else "✗",
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     with tab_add:
-        st.markdown("#### Invite New User")
-        st.info("This will create a Supabase auth user and send them an invitation email. They set their own password on first login.")
+        st.markdown("#### Add New User")
+        st.info("This will create the user directly. They can log in immediately with the password you set.")
 
         depts = get_departments()
         dept_map = {"— No department —": None, **{d["name"]: d["id"] for d in depts}}
 
-        with st.form("invite_user", clear_on_submit=True):
+        with st.form("add_user", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 full_name = st.text_input("Full Name *")
                 email     = st.text_input("Email Address *")
+                password  = st.text_input("Password *", type="password")
             with c2:
-                role = st.selectbox("Role *", ["viewer","quality_engineer","quality_manager","admin"])
+                role = st.selectbox("Role *", ["viewer", "quality_engineer", "quality_manager", "admin"])
                 dept = st.selectbox("Department", list(dept_map.keys()))
 
-            submitted = st.form_submit_button("📧 Send Invitation")
+            submitted = st.form_submit_button("➕ Create User")
 
         if submitted:
-            if not full_name or not email:
-                st.error("Name and email are required.")
+            if not full_name or not email or not password:
+                st.error("Name, email and password are all required.")
+            elif len(password) < 6:
+                st.error("Password must be at least 6 characters.")
             else:
                 try:
-                    # Supabase admin invite (requires service role key for production)
-                    # For now, create user directly
-                    import secrets, string
-                    temp_pw = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+                    # Insert directly into profiles with hashed password
+                    import uuid
+                    new_id = str(uuid.uuid4())
 
-                    res = sb.auth.admin.invite_user_by_email(email, {
-                        "data": {
-                            "full_name": full_name,
-                            "role": role,
-                        }
-                    })
+                    sb.table("profiles").insert({
+                        "id":            new_id,
+                        "full_name":     full_name,
+                        "email":         email,
+                        "role":          role,
+                        "department_id": dept_map[dept],
+                        "is_active":     True,
+                        "password_hash": sb.rpc("hash_password", {"p_password": password}).execute().data,
+                    }).execute()
 
-                    # Update profile with department
-                    if res.user:
-                        sb.table("profiles").update({
-                            "full_name": full_name,
-                            "role": role,
-                            "department_id": dept_map[dept],
-                        }).eq("id", res.user.id).execute()
-
-                    st.success(f"✅ Invitation sent to {email}. They will receive an email to set their password.")
+                    st.success(f"✅ User '{full_name}' created successfully. They can now log in.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error inviting user: {e}")
-                    st.caption("Note: User invitation requires Supabase service role key. Ensure SUPABASE_SERVICE_KEY is set.")
+                    st.error(f"Error creating user: {e}")
