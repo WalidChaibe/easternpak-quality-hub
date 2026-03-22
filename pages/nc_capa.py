@@ -210,11 +210,18 @@ def show(audit_type: str):
         if not open_findings:
             st.success("All findings are closed. ✓")
         else:
-            opts = {f"{f['finding_ref']} — {(f['details'] or '')[:50]}": f["id"] for f in open_findings}
+            opts = {f"{f['finding_ref']} — {f['details'] or ''}": f["id"] for f in open_findings}
             selected_label = st.selectbox("Select finding to update", list(opts.keys()),
                 key=f"edit_select_{audit_type}")
             selected_id = opts[selected_label]
             rec = next(f for f in open_findings if f["id"] == selected_id)
+
+            # Show finding details as read-only context
+            with st.container():
+                st.markdown("##### 📌 Finding Details (read-only)")
+                st.info(f"**{rec.get('finding_ref','—')}** | Clause: {rec.get('clause_ref','—')} | Audit: {rec.get('audit_ref','—')}")
+                st.markdown(f"**Non-Conformity:**")
+                st.warning(rec.get("details", "—"))
 
             with st.form(f"edit_finding_{audit_type}_{selected_id}"):
                 col1, col2 = st.columns(2)
