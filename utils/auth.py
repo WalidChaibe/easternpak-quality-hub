@@ -1,3 +1,5 @@
+import os
+import requests
 import streamlit as st
 from utils.supabase_client import get_supabase
 
@@ -19,24 +21,44 @@ WRITE_ROLES = {"admin","quality_manager","quality_engineer"}
 
 
 def login(email: str, password: str) -> bool:
-    sb = get_supabase()
     try:
-        res = sb.auth.sign_in_with_password({"email": email, "password": password})
-        if res.user:
-            profile = sb.table("profiles").select("*").eq("id", res.user.id).single().execute()
-            st.session_state["user"]    = res.user
-            st.session_state["session"] = res.session
-            st.session_state["profile"] = profile.data
-            return True
+        url = os.environ.get("SUPABASE_URL") or st.secrets["SUPABASE_URL"]
+        key = os.environ.get("SUPABASE_ANON_KEY") or st.secrets["SUPABASE_ANON_KEY"]
+
+        # Sign in via Supabase Auth REST API directly
+        res = requests.post(
+            f"{url}/auth/v1/token?grant_type=password",
+            headers={
+                "apikey": key,
+                "Content-Type": "application/json",
+            },
+            json={"email": email, "password": password},
+        )
+
+        if res.status_code != 200:
+            st.error(f"Login failed: {res.json().get('error_description', 'Invalid email or password.')}")
+            return False
+
+        data = res.json()
+        access_token = data["access_token"]
+        user_id      = data["user"]["id"]
+
+        # Fetch profile using the access token
+        sb = get_supabase()
+        profile = sb.table("profiles").select("*").eq("id", user_id).single().execute()
+
+        st.session_state["user"]         = data["user"]
+        st.session_state["access_token"] = access_token
+        st.session_state["profile"]      = profile.data
+        return True
+
     except Exception as e:
         st.error(f"Login failed: {e}")
     return False
 
 
 def logout():
-    sb = get_supabase()
-    sb.auth.sign_out()
-    for key in ["user","session","profile"]:
+    for key in ["user", "access_token", "profile", "session"]:
         st.session_state.pop(key, None)
     st.rerun()
 
