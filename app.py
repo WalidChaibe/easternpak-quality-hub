@@ -92,7 +92,7 @@ def route():
         from pages.dashboard    import show; show()
     elif page in ("nc", "nc_iso", "nc_brcgs"):
         st.session_state["page"] = "nc"
-        from pages.nc_capa      import show; show()
+        from pages.nc_findings  import show; show()
     elif page == "kpi":
         from pages.kpi          import show; show()
     elif page == "documents":
