@@ -5,296 +5,316 @@ from utils.auth import require_auth, can_write, get_profile
 from utils.supabase_client import get_supabase
 from utils.helpers import users_options, status_badge, format_date
 
+AUDIT_TYPES = ["ISO 9001", "ISO 14001", "ISO 45001", "BRCGS", "QMS Internal Audit"]
+AUDIT_TYPE_MAP = {
+    "ISO 9001":           "ISO9001",
+    "ISO 14001":          "ISO14001",
+    "ISO 45001":          "ISO45001",
+    "BRCGS":              "BRCGS",
+    "QMS Internal Audit": "QMS",
+}
+AUDIT_TYPE_REVERSE = {v: k for k, v in AUDIT_TYPE_MAP.items()}
+STATUSES = ["open", "in_progress", "closed", "overdue"]
 
-def show(audit_type: str):
+STATUS_COLOR = {
+    "open":        "🟡",
+    "in_progress": "🔵",
+    "closed":      "🟢",
+    "overdue":     "🔴",
+}
+
+
+def show():
     require_auth()
-    label = "ISO 9001" if audit_type == "ISO9001" else "BRCGS"
-    st.title(f"📋 NC/CAPA — {label}")
-    st.caption("Previous audit findings — log, track and close non-conformities")
-
     sb = get_supabase()
 
-    tab_list, tab_add, tab_edit = st.tabs(["📄 All Findings", "➕ Log New Finding", "✏️ Update Finding"])
+    st.title("📋 NC / CAPA — Findings Tracker")
+    st.caption("All audit findings in one place — ISO 9001 · ISO 14001 · ISO 45001 · BRCGS · QMS Internal Audit")
 
-    # ──────────────────────────────────────────────────────────
-    # TAB 1 — List
-    # ──────────────────────────────────────────────────────────
-    with tab_list:
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            status_filter = st.selectbox(
-                "Filter by status",
-                ["All", "open", "in_progress", "closed", "overdue"],
-                key=f"status_filter_{audit_type}"
+    # ── Update schema to support new audit types ──────────────
+    # (handled via check constraint update in SQL — see below)
+
+    # ── TOP FILTERS ───────────────────────────────────────────
+    with st.container():
+        c1, c2, c3, c4 = st.columns([1.2, 1.2, 1, 1])
+        with c1:
+            audit_filter = st.multiselect(
+                "Audit Type",
+                options=list(AUDIT_TYPE_MAP.keys()),
+                default=list(AUDIT_TYPE_MAP.keys()),
+                key="nc_audit_filter"
             )
-
-        query = sb.table("nc_findings").select(
-            "*, profiles!nc_findings_action_owner_id_fkey(full_name)"
-        ).eq("audit_type", audit_type).order("created_at")
-
-        if status_filter != "All":
-            query = query.eq("status", status_filter)
-
-        res = query.execute()
-        findings = res.data or []
-
-        if not findings:
-            st.info("No findings recorded yet.")
-        else:
-            rows = []
-            for f in findings:
-                owner = (f.get("profiles") or {}).get("full_name", "—")
-                rows.append({
-                    "Ref":        f.get("finding_ref", "—"),
-                    "Clause":     f.get("clause_ref", "—"),
-                    "Details":    f.get("details", "") or "",
-                    "Owner":      owner,
-                    "Target":     format_date(f.get("target_date")),
-                    "Closed":     format_date(f.get("closing_date")),
-                    "Status":     status_badge(f.get("status", "open")),
-                    "_id":        f["id"],
-                })
-            df = pd.DataFrame(rows)
-            st.dataframe(df.drop(columns=["_id"]), use_container_width=True, hide_index=True, column_config={"Details": st.column_config.TextColumn("Details", width="large")})
-
-            overdue = [f for f in findings if f.get("target_date") and
-                       date.fromisoformat(f["target_date"]) < date.today() and
-                       f.get("status") != "closed"]
-            if overdue:
-                st.warning(f"⚠️ {len(overdue)} finding(s) past their target date and not yet closed.")
-
-        # ── Expanded view ─────────────────────────────────────
-        if findings:
-            st.markdown("---")
-            st.markdown("#### View Full Finding Details")
-            opts = {f"{f.get('finding_ref','—')} — {f.get('details','') or ''}": f for f in findings}
-            sel_label = st.selectbox("Select finding", list(opts.keys()), key=f"view_sel_{audit_type}")
-            sel = opts[sel_label]
-
-            with st.container():
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown(f"**Clause/Ref:** {sel.get('clause_ref') or '—'}")
-                    st.markdown(f"**Audit:** {sel.get('audit_ref') or '—'}")
-                    st.markdown(f"**Status:** {status_badge(sel.get('status','open'))}")
-                    st.markdown(f"**Target Date:** {format_date(sel.get('target_date'))}")
-                    st.markdown(f"**Closing Date:** {format_date(sel.get('closing_date'))}")
-                with c2:
-                    owner = (sel.get("profiles") or {}).get("full_name", "—")
-                    st.markdown(f"**Action Owner:** {owner}")
-                    st.markdown(f"**Evidence Notes:** {sel.get('evidence_notes') or '—'}")
-
-                st.markdown(f"**Details of Non-Conformity:**")
-                st.info(sel.get("details", "—"))
-                st.markdown(f"**Root Cause Analysis:**")
-                st.info(sel.get("root_cause") or "—")
-                st.markdown(f"**Correction:**")
-                st.info(sel.get("correction") or "—")
-                st.markdown(f"**Preventive Action Plan:**")
-                st.info(sel.get("preventive_action") or "—")
-
-                # Evidence files
-                evidence = sb.table("nc_evidence").select("*").eq("finding_id", sel["id"]).execute()
-                if evidence.data:
-                    st.markdown("**Attached Evidence:**")
-                    for ev in evidence.data:
-                        st.markdown(f"📎 [{ev.get('file_name','File')}]({ev.get('file_url','#')})")
-
-    # ──────────────────────────────────────────────────────────
-    # TAB 2 — Add New Finding
-    # ──────────────────────────────────────────────────────────
-    with tab_add:
-        if not can_write():
-            st.info("You have view-only access. Contact your Quality Manager to log findings.")
-            return
-
-        with st.form(f"new_finding_{audit_type}", clear_on_submit=True):
-            st.markdown("#### New Non-Conformity")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                clause_ref  = st.text_input("Clause / Requirement Ref",
-                    placeholder=f"e.g. {'8.5.2' if audit_type=='ISO9001' else 'Section 3.5'}")
-                audit_ref   = st.text_input("Audit Name",
-                    placeholder=f"e.g. {label} Annual Audit 2025")
-            with col2:
-                owner_opts  = users_options()
-                owner_label = st.selectbox("Action Owner *", list(owner_opts.keys()),
-                    key=f"owner_{audit_type}")
-                target_date = st.date_input("Target Closure Date", value=None,
-                    key=f"target_{audit_type}")
-                status      = st.selectbox("Status", ["open", "in_progress"],
-                    key=f"status_new_{audit_type}")
-
-            details           = st.text_area("Details of Non-Conformity *", height=100)
-            root_cause        = st.text_area("Root Cause Analysis", height=80)
-            correction        = st.text_area("Immediate Correction Taken", height=80)
-            preventive_action = st.text_area("Preventive Action Plan", height=80)
-            evidence_notes    = st.text_area("Evidence / Notes", height=60)
-
-            # File upload
-            uploaded_file = st.file_uploader(
-                "Attach Evidence (optional)",
-                type=["pdf","png","jpg","jpeg","docx","xlsx"],
-                key=f"upload_{audit_type}"
+        with c2:
+            status_filter = st.multiselect(
+                "Status",
+                options=STATUSES,
+                default=["open", "in_progress", "overdue"],
+                key="nc_status_filter"
             )
+        with c3:
+            search = st.text_input("🔍 Search", placeholder="keyword in details...", key="nc_search")
+        with c4:
+            show_closed = st.toggle("Include Closed", value=False, key="nc_show_closed")
 
-            submitted = st.form_submit_button("💾 Save Finding", use_container_width=True)
+    # ── FETCH ALL FINDINGS ────────────────────────────────────
+    query = sb.table("nc_findings").select(
+        "*, profiles!nc_findings_action_owner_id_fkey(full_name)"
+    ).order("target_date")
 
-        if submitted:
-            if not details:
-                st.error("Details of Non-Conformity is required.")
-            else:
-                profile = get_profile()
+    audit_codes = [AUDIT_TYPE_MAP[a] for a in audit_filter]
+    if audit_codes:
+        query = query.in_("audit_type", audit_codes)
 
-                # Auto-generate finding ref
-                count_res = sb.table("nc_findings").select("id", count="exact").eq("audit_type", audit_type).execute()
-                count = (count_res.count or 0) + 1
-                prefix = "ISO" if audit_type == "ISO9001" else "BRC"
-                finding_ref = f"{prefix}-{str(count).zfill(3)}"
+    if not show_closed:
+        status_filter_active = [s for s in status_filter if s != "closed"]
+    else:
+        status_filter_active = status_filter
 
-                payload = {
-                    "audit_type":        audit_type,
-                    "finding_ref":       finding_ref,
-                    "clause_ref":        clause_ref or None,
-                    "audit_ref":         audit_ref or None,
-                    "details":           details,
-                    "root_cause":        root_cause or None,
-                    "correction":        correction or None,
-                    "preventive_action": preventive_action or None,
-                    "evidence_notes":    evidence_notes or None,
-                    "action_owner_id":   owner_opts[owner_label],
-                    "target_date":       target_date.isoformat() if target_date else None,
-                    "status":            status,
-                    "created_by":        profile["id"],
-                }
-                try:
-                    insert_res = sb.table("nc_findings").insert(payload).execute()
-                    new_id = insert_res.data[0]["id"]
+    if status_filter_active:
+        query = query.in_("status", status_filter_active)
 
-                    # Handle file upload to Supabase Storage
-                    if uploaded_file:
-                        file_bytes = uploaded_file.read()
-                        file_name  = uploaded_file.name
-                        storage_path = f"evidence/{new_id}/{file_name}"
-                        try:
-                            sb.storage.from_("evidence").upload(storage_path, file_bytes)
-                            file_url = sb.storage.from_("evidence").get_public_url(storage_path)
-                            sb.table("nc_evidence").insert({
-                                "finding_id": new_id,
-                                "file_name":  file_name,
-                                "file_url":   file_url,
-                                "uploaded_by": profile["id"],
-                            }).execute()
-                        except Exception as fe:
-                            st.warning(f"Finding saved but file upload failed: {fe}")
+    res = query.execute()
+    findings = res.data or []
 
-                    st.success(f"✅ Finding {finding_ref} saved successfully.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error saving: {e}")
+    # Search filter
+    if search:
+        s = search.lower()
+        findings = [f for f in findings if
+                    s in (f.get("details","") or "").lower() or
+                    s in (f.get("finding_ref","") or "").lower() or
+                    s in (f.get("clause_ref","") or "").lower() or
+                    s in (f.get("root_cause","") or "").lower()]
 
-    # ──────────────────────────────────────────────────────────
-    # TAB 3 — Update / Close a Finding
-    # ──────────────────────────────────────────────────────────
-    with tab_edit:
+    # ── SUMMARY ROW ───────────────────────────────────────────
+    total    = len(findings)
+    overdue  = sum(1 for f in findings if f.get("target_date") and
+                   date.fromisoformat(f["target_date"]) < date.today() and
+                   f.get("status") != "closed")
+    open_c   = sum(1 for f in findings if f.get("status") == "open")
+    inprog   = sum(1 for f in findings if f.get("status") == "in_progress")
+    closed_c = sum(1 for f in findings if f.get("status") == "closed")
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Total Shown", total)
+    m2.metric("🟡 Open", open_c)
+    m3.metric("🔵 In Progress", inprog)
+    m4.metric("🟢 Closed", closed_c)
+    m5.metric("🔴 Overdue", overdue)
+
+    st.markdown("---")
+
+    # ── ADD NEW FINDING (collapsible) ─────────────────────────
+    with st.expander("➕ Log New Finding", expanded=False):
         if not can_write():
             st.info("View-only access.")
-            return
-
-        res = sb.table("nc_findings").select(
-            "id, finding_ref, details, status, audit_type, clause_ref, root_cause, correction, preventive_action, evidence_notes, target_date, closing_date, action_owner_id"
-        ).eq("audit_type", audit_type).neq("status", "closed").order("finding_ref").execute()
-        open_findings = res.data or []
-
-        if not open_findings:
-            st.success("All findings are closed. ✓")
         else:
-            opts = {f"{f['finding_ref']} — {f['details'] or ''}": f["id"] for f in open_findings}
-            selected_label = st.selectbox("Select finding to update", list(opts.keys()),
-                key=f"edit_select_{audit_type}")
-            selected_id = opts[selected_label]
-            rec = next(f for f in open_findings if f["id"] == selected_id)
+            with st.form("new_finding", clear_on_submit=True):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    audit_type_label = st.selectbox("Audit Type *", AUDIT_TYPES)
+                    audit_ref        = st.text_input("Audit Name", placeholder="e.g. BRCGS Annual Audit 2025")
+                    clause_ref       = st.text_input("Clause / Requirement Ref", placeholder="e.g. 3.5.2")
+                with c2:
+                    owner_opts  = users_options()
+                    owner_label = st.selectbox("Action Owner *", list(owner_opts.keys()))
+                    target_date = st.date_input("Target Closure Date", value=None)
+                    status      = st.selectbox("Status", ["open", "in_progress"])
+                with c3:
+                    evidence_notes = st.text_area("Remarks / Notes", height=122)
 
-            # Show finding details as read-only context
-            with st.container():
-                st.markdown("##### 📌 Finding Details (read-only)")
-                st.info(f"**{rec.get('finding_ref','—')}** | Clause: {rec.get('clause_ref','—')} | Audit: {rec.get('audit_ref','—')}")
-                st.markdown(f"**Non-Conformity:**")
-                st.warning(rec.get("details", "—"))
-
-            with st.form(f"edit_finding_{audit_type}_{selected_id}"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    new_status = st.selectbox("Status",
-                        ["open", "in_progress", "closed", "overdue"],
-                        index=["open", "in_progress", "closed", "overdue"].index(rec.get("status", "open")))
-                with col2:
-                    closing_date = st.date_input("Date of Closing",
-                        value=date.fromisoformat(rec["closing_date"]) if rec.get("closing_date") else None)
-
-                owner_opts = users_options(include_blank=False)
-                current_owner_key = next(
-                    (k for k, v in owner_opts.items() if v == rec.get("action_owner_id")),
-                    list(owner_opts.keys())[0]
-                )
-                owner_label = st.selectbox("Action Owner", list(owner_opts.keys()),
-                    index=list(owner_opts.keys()).index(current_owner_key))
-
-                target_date       = st.date_input("Target Closure Date",
-                    value=date.fromisoformat(rec["target_date"]) if rec.get("target_date") else None)
-                root_cause        = st.text_area("Root Cause Analysis",
-                    value=rec.get("root_cause", "") or "", height=80)
-                correction        = st.text_area("Correction Taken",
-                    value=rec.get("correction", "") or "", height=80)
-                preventive_action = st.text_area("Preventive Action Plan",
-                    value=rec.get("preventive_action", "") or "", height=80)
-                evidence_notes    = st.text_area("Evidence / Notes",
-                    value=rec.get("evidence_notes", "") or "", height=60)
+                details           = st.text_area("Details of Non-Conformity *", height=80)
+                root_cause        = st.text_area("Root Cause Analysis", height=70)
+                correction        = st.text_area("Immediate Correction", height=70)
+                preventive_action = st.text_area("Preventive Action Plan", height=70)
 
                 uploaded_file = st.file_uploader(
-                    "Attach Additional Evidence",
-                    type=["pdf","png","jpg","jpeg","docx","xlsx"],
-                    key=f"edit_upload_{audit_type}_{selected_id}"
+                    "Attach Evidence",
+                    type=["pdf","png","jpg","jpeg","docx","xlsx"]
                 )
 
-                save = st.form_submit_button("💾 Save Updates", use_container_width=True)
+                submitted = st.form_submit_button("💾 Save Finding", use_container_width=True)
 
-            if save:
-                update = {
-                    "status":            new_status,
-                    "root_cause":        root_cause or None,
-                    "correction":        correction or None,
-                    "preventive_action": preventive_action or None,
-                    "evidence_notes":    evidence_notes or None,
-                    "action_owner_id":   owner_opts[owner_label],
-                    "target_date":       target_date.isoformat() if target_date else None,
-                }
-                if new_status == "closed" and closing_date:
-                    update["closing_date"] = closing_date.isoformat()
+            if submitted:
+                if not details:
+                    st.error("Details of Non-Conformity is required.")
+                else:
+                    profile    = get_profile()
+                    audit_code = AUDIT_TYPE_MAP[audit_type_label]
+                    count_res  = sb.table("nc_findings").select("id", count="exact").eq("audit_type", audit_code).execute()
+                    count      = (count_res.count or 0) + 1
+                    prefix_map = {"ISO9001":"ISO","ISO14001":"ISO14","ISO45001":"ISO45","BRCGS":"BRC","QMS":"QMS"}
+                    prefix     = prefix_map.get(audit_code, "NC")
+                    finding_ref = f"{prefix}-{str(count).zfill(3)}"
 
+                    payload = {
+                        "audit_type":        audit_code,
+                        "finding_ref":       finding_ref,
+                        "clause_ref":        clause_ref or None,
+                        "audit_ref":         audit_ref or None,
+                        "details":           details,
+                        "root_cause":        root_cause or None,
+                        "correction":        correction or None,
+                        "preventive_action": preventive_action or None,
+                        "evidence_notes":    evidence_notes or None,
+                        "action_owner_id":   owner_opts[owner_label],
+                        "target_date":       target_date.isoformat() if target_date else None,
+                        "status":            status,
+                        "created_by":        profile["id"],
+                    }
+                    try:
+                        insert_res = sb.table("nc_findings").insert(payload).execute()
+                        new_id     = insert_res.data[0]["id"]
+
+                        if uploaded_file:
+                            file_bytes   = uploaded_file.read()
+                            storage_path = f"evidence/{new_id}/{uploaded_file.name}"
+                            try:
+                                sb.storage.from_("evidence").upload(storage_path, file_bytes)
+                                file_url = sb.storage.from_("evidence").get_public_url(storage_path)
+                                sb.table("nc_evidence").insert({
+                                    "finding_id":  new_id,
+                                    "file_name":   uploaded_file.name,
+                                    "file_url":    file_url,
+                                    "uploaded_by": profile["id"],
+                                }).execute()
+                            except Exception as fe:
+                                st.warning(f"Finding saved but file upload failed: {fe}")
+
+                        st.success(f"✅ Finding {finding_ref} saved.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # ── FINDINGS LIST ─────────────────────────────────────────
+    if not findings:
+        st.info("No findings match your filters.")
+    else:
+        for f in findings:
+            owner      = (f.get("profiles") or {}).get("full_name", "—")
+            target     = f.get("target_date")
+            is_overdue = target and date.fromisoformat(target) < date.today() and f.get("status") != "closed"
+            status_val = f.get("status","open")
+            emoji      = STATUS_COLOR.get(status_val,"⚪")
+            audit_label = AUDIT_TYPE_REVERSE.get(f.get("audit_type",""), f.get("audit_type",""))
+
+            # Expander title — compact but informative
+            expander_title = (
+                f"{emoji} **{f.get('finding_ref','—')}** · {audit_label} · "
+                f"{f.get('clause_ref','') or ''} · "
+                f"Owner: {owner} · "
+                f"Due: {format_date(target)}"
+                + (" 🔴 OVERDUE" if is_overdue else "")
+            )
+
+            with st.expander(expander_title, expanded=False):
+                # Details (read-only)
+                st.markdown(f"**Audit:** {f.get('audit_ref','—')}")
+                st.info(f.get("details","—"))
+
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    st.markdown(f"**Root Cause:**")
+                    st.markdown(f.get("root_cause","—") or "—")
+                    st.markdown(f"**Correction:**")
+                    st.markdown(f.get("correction","—") or "—")
+                with col_r:
+                    st.markdown(f"**Preventive Action:**")
+                    st.markdown(f.get("preventive_action","—") or "—")
+                    st.markdown(f"**Remarks:**")
+                    st.markdown(f.get("evidence_notes","—") or "—")
+
+                # Evidence files
                 try:
-                    sb.table("nc_findings").update(update).eq("id", selected_id).execute()
+                    evidence = sb.table("nc_evidence").select("*").eq("finding_id", f["id"]).execute()
+                    if evidence.data:
+                        st.markdown("**📎 Attached Evidence:**")
+                        for ev in evidence.data:
+                            st.markdown(f"[{ev.get('file_name','File')}]({ev.get('file_url','#')})")
+                except:
+                    pass
 
-                    # Handle file upload
-                    if uploaded_file:
-                        profile = get_profile()
-                        file_bytes   = uploaded_file.read()
-                        file_name    = uploaded_file.name
-                        storage_path = f"evidence/{selected_id}/{file_name}"
+                # Inline update form (only for non-closed or write access)
+                if can_write():
+                    st.markdown("---")
+                    with st.form(f"update_{f['id']}"):
+                        uc1, uc2, uc3 = st.columns(3)
+                        with uc1:
+                            new_status = st.selectbox(
+                                "Status",
+                                STATUSES,
+                                index=STATUSES.index(status_val),
+                                key=f"status_{f['id']}"
+                            )
+                        with uc2:
+                            owner_opts   = users_options(include_blank=False)
+                            current_key  = next(
+                                (k for k, v in owner_opts.items() if v == f.get("action_owner_id")),
+                                list(owner_opts.keys())[0]
+                            )
+                            new_owner = st.selectbox(
+                                "Action Owner",
+                                list(owner_opts.keys()),
+                                index=list(owner_opts.keys()).index(current_key),
+                                key=f"owner_{f['id']}"
+                            )
+                        with uc3:
+                            new_target = st.date_input(
+                                "Target Date",
+                                value=date.fromisoformat(target) if target else None,
+                                key=f"target_{f['id']}"
+                            )
+                            closing_date = st.date_input(
+                                "Closing Date",
+                                value=date.fromisoformat(f["closing_date"]) if f.get("closing_date") else None,
+                                key=f"closing_{f['id']}"
+                            )
+
+                        new_rc  = st.text_area("Root Cause", value=f.get("root_cause","") or "", height=60, key=f"rc_{f['id']}")
+                        new_cor = st.text_area("Correction", value=f.get("correction","") or "", height=60, key=f"cor_{f['id']}")
+                        new_pa  = st.text_area("Preventive Action", value=f.get("preventive_action","") or "", height=60, key=f"pa_{f['id']}")
+                        new_ev  = st.text_area("Remarks / Notes", value=f.get("evidence_notes","") or "", height=50, key=f"ev_{f['id']}")
+
+                        new_file = st.file_uploader(
+                            "Attach Evidence",
+                            type=["pdf","png","jpg","jpeg","docx","xlsx"],
+                            key=f"file_{f['id']}"
+                        )
+
+                        save = st.form_submit_button("💾 Save Updates", use_container_width=True)
+
+                    if save:
+                        update = {
+                            "status":            new_status,
+                            "action_owner_id":   owner_opts[new_owner],
+                            "target_date":       new_target.isoformat() if new_target else None,
+                            "root_cause":        new_rc or None,
+                            "correction":        new_cor or None,
+                            "preventive_action": new_pa or None,
+                            "evidence_notes":    new_ev or None,
+                        }
+                        if new_status == "closed" and closing_date:
+                            update["closing_date"] = closing_date.isoformat()
+
                         try:
-                            sb.storage.from_("evidence").upload(storage_path, file_bytes)
-                            file_url = sb.storage.from_("evidence").get_public_url(storage_path)
-                            sb.table("nc_evidence").insert({
-                                "finding_id":  selected_id,
-                                "file_name":   file_name,
-                                "file_url":    file_url,
-                                "uploaded_by": profile["id"],
-                            }).execute()
-                        except Exception as fe:
-                            st.warning(f"Finding updated but file upload failed: {fe}")
+                            sb.table("nc_findings").update(update).eq("id", f["id"]).execute()
 
-                    st.success("✅ Finding updated.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                            if new_file:
+                                profile      = get_profile()
+                                file_bytes   = new_file.read()
+                                storage_path = f"evidence/{f['id']}/{new_file.name}"
+                                try:
+                                    sb.storage.from_("evidence").upload(storage_path, file_bytes)
+                                    file_url = sb.storage.from_("evidence").get_public_url(storage_path)
+                                    sb.table("nc_evidence").insert({
+                                        "finding_id":  f["id"],
+                                        "file_name":   new_file.name,
+                                        "file_url":    file_url,
+                                        "uploaded_by": profile["id"],
+                                    }).execute()
+                                except Exception as fe:
+                                    st.warning(f"Updated but file upload failed: {fe}")
+
+                            st.success("✅ Updated.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
