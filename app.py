@@ -90,7 +90,8 @@ def route():
 
     if page == "dashboard":
         from pages.dashboard    import show; show()
-    elif page == "nc":
+    elif page in ("nc", "nc_iso", "nc_brcgs"):
+        st.session_state["page"] = "nc"
         from pages.nc_capa      import show; show()
     elif page == "kpi":
         from pages.kpi          import show; show()
