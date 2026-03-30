@@ -62,8 +62,7 @@ def show_sidebar():
 
         nav_items = [
             ("dashboard",  "🏠  Dashboard",              "dashboard"),
-            ("nc_iso",     "📋  NC/CAPA — ISO 9001",     "nc_iso"),
-            ("nc_brcgs",   "📋  NC/CAPA — BRCGS",        "nc_brcgs"),
+            ("nc",         "📋  NC / CAPA",              "nc"),
             ("kpi",        "📊  KPI Tracking",            "kpi"),
             ("documents",  "📁  Document Register",       "documents"),
             ("audits",     "🔍  Internal Audits",         "audits"),
@@ -91,10 +90,8 @@ def route():
 
     if page == "dashboard":
         from pages.dashboard    import show; show()
-    elif page == "nc_iso":
-        from pages.nc_capa      import show; show("ISO9001")
-    elif page == "nc_brcgs":
-        from pages.nc_capa      import show; show("BRCGS")
+    elif page == "nc":
+        from pages.nc_capa      import show; show()
     elif page == "kpi":
         from pages.kpi          import show; show()
     elif page == "documents":
