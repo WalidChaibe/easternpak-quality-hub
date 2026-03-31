@@ -1,9 +1,15 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
+from io import BytesIO
 from utils.auth import require_auth, can_write, get_profile
 from utils.supabase_client import get_supabase
 from utils.helpers import users_options, status_badge, format_date
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib import colors
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 AUDIT_TYPES = ["ISO 9001", "ISO 14001", "ISO 45001", "BRCGS", "QMS Internal Audit"]
 AUDIT_TYPE_MAP = {
@@ -23,6 +29,93 @@ STATUS_COLOR = {
     "overdue":     "🔴",
 }
 
+
+
+def generate_pdf(findings: list, filters_desc: str) -> bytes:
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        rightMargin=1*cm, leftMargin=1*cm,
+        topMargin=1.5*cm, bottomMargin=1*cm
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("title", fontSize=14, fontName="Helvetica-Bold", spaceAfter=4)
+    sub_style   = ParagraphStyle("sub",   fontSize=9,  fontName="Helvetica",      spaceAfter=10, textColor=colors.grey)
+    cell_style  = ParagraphStyle("cell",  fontSize=7.5,fontName="Helvetica",      leading=10)
+    head_style  = ParagraphStyle("head",  fontSize=8,  fontName="Helvetica-Bold", textColor=colors.white)
+
+    STATUS_COLORS = {
+        "open":        colors.HexColor("#FFC107"),
+        "in_progress": colors.HexColor("#2196F3"),
+        "closed":      colors.HexColor("#4CAF50"),
+        "overdue":     colors.HexColor("#F44336"),
+    }
+
+    AUDIT_REVERSE = {
+        "ISO9001": "ISO 9001", "ISO14001": "ISO 14001",
+        "ISO45001": "ISO 45001", "BRCGS": "BRCGS", "QMS": "QMS Internal Audit"
+    }
+
+    elements = []
+    elements.append(Paragraph("Easternpak Quality Hub — NC/CAPA Findings Report", title_style))
+    elements.append(Paragraph(f"Generated: {date.today().strftime('%d %b %Y')} | Filters: {filters_desc}", sub_style))
+
+    # Table header
+    headers = ["Ref", "Audit Type", "Clause", "Non-Conformity Details", "Root Cause",
+               "Correction", "Preventive Action", "Owner", "Target Date", "Status", "Remarks"]
+    col_widths = [1.5*cm, 2.2*cm, 1.8*cm, 6*cm, 4.5*cm, 4*cm, 4*cm, 2.5*cm, 2*cm, 2*cm, 3*cm]
+
+    data = [[Paragraph(h, head_style) for h in headers]]
+
+    row_colors = []
+    for i, f in enumerate(findings):
+        status = f.get("status","open")
+        owner  = (f.get("profiles") or {}).get("full_name","—")
+        row = [
+            Paragraph(f.get("finding_ref","—") or "—", cell_style),
+            Paragraph(AUDIT_REVERSE.get(f.get("audit_type",""),"—"), cell_style),
+            Paragraph(f.get("clause_ref","—") or "—", cell_style),
+            Paragraph(f.get("details","—") or "—", cell_style),
+            Paragraph(f.get("root_cause","—") or "—", cell_style),
+            Paragraph(f.get("correction","—") or "—", cell_style),
+            Paragraph(f.get("preventive_action","—") or "—", cell_style),
+            Paragraph(owner, cell_style),
+            Paragraph(format_date(f.get("target_date")), cell_style),
+            Paragraph(status.replace("_"," ").title(), cell_style),
+            Paragraph(f.get("evidence_notes","—") or "—", cell_style),
+        ]
+        data.append(row)
+        row_colors.append(STATUS_COLORS.get(status, colors.white))
+
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+
+    style_cmds = [
+        ("BACKGROUND",    (0,0), (-1,0),  colors.HexColor("#0f1c2e")),
+        ("TEXTCOLOR",     (0,0), (-1,0),  colors.white),
+        ("FONTNAME",      (0,0), (-1,0),  "Helvetica-Bold"),
+        ("FONTSIZE",      (0,0), (-1,-1), 7.5),
+        ("ROWBACKGROUNDS",(0,1), (-1,-1), [colors.HexColor("#F9F9F9"), colors.white]),
+        ("GRID",          (0,0), (-1,-1), 0.4, colors.HexColor("#DDDDDD")),
+        ("VALIGN",        (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING",   (0,0), (-1,-1), 4),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 4),
+        ("TOPPADDING",    (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+    ]
+
+    # Color status column per row
+    for i, color in enumerate(row_colors):
+        style_cmds.append(("BACKGROUND", (9, i+1), (9, i+1), color))
+        style_cmds.append(("TEXTCOLOR",  (9, i+1), (9, i+1), colors.white))
+
+    table.setStyle(TableStyle(style_cmds))
+    elements.append(table)
+
+    doc.build(elements)
+    buf.seek(0)
+    return buf.getvalue()
 
 def show():
     require_auth()
@@ -100,6 +193,53 @@ def show():
     m3.metric("🔵 In Progress", inprog)
     m4.metric("🟢 Closed", closed_c)
     m5.metric("🔴 Overdue", overdue)
+
+    # ── EXPORT BUTTONS ───────────────────────────────────────
+    ex1, ex2, _ = st.columns([1, 1, 4])
+    with ex1:
+        if findings:
+            pdf_bytes = generate_pdf(findings,
+                f"Audit: {', '.join(audit_filter)} | Status: {', '.join(status_filter_active)}")
+            st.download_button(
+                "📄 Export PDF",
+                data=pdf_bytes,
+                file_name=f"NC_CAPA_Report_{date.today()}.pdf",
+                mime="application/pdf",
+                key="export_pdf"
+            )
+    with ex2:
+        if findings:
+            rows = []
+            for f in findings:
+                owner = (f.get("profiles") or {}).get("full_name","—")
+                rows.append({
+                    "Ref":               f.get("finding_ref","—"),
+                    "Audit Type":        f.get("audit_type",""),
+                    "Clause":            f.get("clause_ref","—"),
+                    "Details":           f.get("details",""),
+                    "Root Cause":        f.get("root_cause",""),
+                    "Correction":        f.get("correction",""),
+                    "Preventive Action": f.get("preventive_action",""),
+                    "Owner":             owner,
+                    "Target Date":       format_date(f.get("target_date")),
+                    "Closing Date":      format_date(f.get("closing_date")),
+                    "Status":            f.get("status",""),
+                    "Remarks":           f.get("evidence_notes",""),
+                })
+            from io import BytesIO as _BytesIO
+            import openpyxl as _xl
+            buf = _BytesIO()
+            df_exp = pd.DataFrame(rows)
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df_exp.to_excel(writer, index=False, sheet_name="NC CAPA")
+            buf.seek(0)
+            st.download_button(
+                "📊 Export Excel",
+                data=buf,
+                file_name=f"NC_CAPA_{date.today()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="export_excel"
+            )
 
     st.markdown("---")
 
