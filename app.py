@@ -61,12 +61,13 @@ def show_sidebar():
         st.markdown("---")
 
         nav_items = [
-            ("dashboard",  "🏠  Dashboard",              "dashboard"),
-            ("nc",         "📋  NC / CAPA",              "nc"),
-            ("kpi",        "📊  KPI Tracking",            "kpi"),
-            ("documents",  "📁  Document Register",       "documents"),
-            ("audits",     "🔍  Internal Audits",         "audits"),
-            ("admin",      "⚙️  User Management",         "admin"),
+            ("dashboard",    "🏠  Dashboard",              "dashboard"),
+            ("nc",           "📋  NC / CAPA",              "nc"),
+            ("kpi",          "📊  KPI Tracking",            "kpi"),
+            ("requirements", "📘  Requirements Register",   "requirements"),
+            ("documents",    "📁  Document Register",       "documents"),
+            ("audits",       "🔍  Internal Audits",         "audits"),
+            ("admin",        "⚙️  User Management",         "admin"),
         ]
 
         if "page" not in st.session_state:
@@ -95,6 +96,8 @@ def route():
         from pages.nc_findings  import show; show()
     elif page == "kpi":
         from pages.kpi          import show; show()
+    elif page == "requirements":
+        from pages.requirements import show; show()
     elif page == "documents":
         from pages.documents    import show; show()
     elif page == "audits":
