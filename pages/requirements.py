@@ -87,14 +87,27 @@ def show():
             nrd_date  = date.fromisoformat(nrd) if nrd else None
             req_depts = dept_links_map.get(r["id"], [])
 
+            # Auto-reset marked_done if next_review_due has passed
+            marked_done = r.get("marked_done", False)
+            if marked_done and nrd_date and nrd_date < today:
+                marked_done = False
+                sb.table("requirements").update({
+                    "marked_done":    False,
+                    "marked_done_at": None,
+                    "marked_done_by": None,
+                }).eq("id", r["id"]).execute()
+
+            # A requirement is "available" if it has docs OR is marked done
+            is_available = has_docs or marked_done
+
             # Department filter
             if dept_label != "All Departments":
                 dept_id = dept_map.get(dept_label)
                 if dept_id not in req_depts:
                     continue
 
-            if avail_filter == "✅ Available" and not has_docs: continue
-            if avail_filter == "❌ Missing"   and has_docs:     continue
+            if avail_filter == "✅ Available" and not is_available: continue
+            if avail_filter == "❌ Missing"   and is_available:     continue
             if review_filter == "Overdue"        and (not nrd_date or nrd_date >= today): continue
             if review_filter == "Due this month" and (not nrd_date or not (today <= nrd_date <= today + timedelta(days=30))): continue
             if review_filter == "Up to date"     and nrd_date and nrd_date < today: continue
@@ -106,13 +119,13 @@ def show():
                    s not in (r.get("description","")   or "").lower():
                     continue
 
-            filtered.append((r, has_docs, nrd_date, req_depts))
+            filtered.append((r, has_docs, nrd_date, req_depts, marked_done, is_available))
 
         # ── Metrics ───────────────────────────────────────────
         total     = len(filtered)
-        available = sum(1 for _, h, _, _ in filtered if h)
+        available = sum(1 for _, _, _, _, _, ia in filtered if ia)
         missing   = total - available
-        overdue_r = sum(1 for _, _, nd, _ in filtered if nd and nd < today)
+        overdue_r = sum(1 for _, _, nd, _, _, _ in filtered if nd and nd < today)
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Clauses",      total)
@@ -120,7 +133,7 @@ def show():
         m3.metric("❌ Missing",          missing)
         m4.metric("🔴 Overdue Reviews",  overdue_r)
 
-        due_soon = [(r, nd) for r, _, nd, _ in filtered if nd and today <= nd <= today + timedelta(days=7)]
+        due_soon = [(r, nd) for r, _, nd, _, _, _ in filtered if nd and today <= nd <= today + timedelta(days=7)]
         if due_soon:
             clauses = ", ".join(r["clause_number"] for r, _ in due_soon)
             st.warning(f"⏰ {len(due_soon)} clause(s) due for review within 7 days: **{clauses}**")
@@ -130,10 +143,15 @@ def show():
         if not filtered:
             st.info("No clauses match your filters.")
         else:
-            for r, has_docs, nrd_date, req_depts in filtered:
+            for r, has_docs, nrd_date, req_depts, marked_done, is_available in filtered:
                 docs         = docs_map.get(r["id"], [])
                 owner        = (r.get("profiles") or {}).get("full_name", "—")
-                status_icon  = "✅" if has_docs else "❌"
+                if marked_done and not has_docs:
+                    status_icon = "✅"
+                elif is_available:
+                    status_icon = "✅"
+                else:
+                    status_icon = "❌"
                 review_str   = format_date(nrd_date) if nrd_date else "—"
                 overdue_flag = " 🔴" if nrd_date and nrd_date < today else ""
                 dept_names   = " · ".join(dept_id_map.get(did, "?") for did in req_depts) or "—"
@@ -157,6 +175,31 @@ def show():
                     with mc3:
                         st.markdown(f"**Owner:** {owner}")
                         st.markdown(f"**Notes:** {r.get('notes','—') or '—'}")
+
+                    # ── Mark as Done button (no doc needed) ───────
+                    if can_write() and not has_docs:
+                        st.markdown("---")
+                        if marked_done:
+                            done_by_res = sb.table("profiles").select("full_name").eq("id", r.get("marked_done_by","")).execute()
+                            done_by     = (done_by_res.data or [{}])[0].get("full_name","—") if r.get("marked_done_by") else "—"
+                            done_at     = format_date(r.get("marked_done_at"))
+                            st.success(f"✅ Marked as done by **{done_by}** on {done_at}. Will reset on next review date.")
+                            if st.button("↩️ Unmark", key=f"unmark_{r['id']}"):
+                                sb.table("requirements").update({
+                                    "marked_done":    False,
+                                    "marked_done_at": None,
+                                    "marked_done_by": None,
+                                }).eq("id", r["id"]).execute()
+                                st.rerun()
+                        else:
+                            if st.button("✅ Mark as Done", key=f"done_{r['id']}", help="No document needed — mark this requirement as fulfilled"):
+                                profile = get_profile()
+                                sb.table("requirements").update({
+                                    "marked_done":    True,
+                                    "marked_done_at": today.isoformat(),
+                                    "marked_done_by": profile["id"],
+                                }).eq("id", r["id"]).execute()
+                                st.rerun()
 
                     # Attached documents
                     if docs:
