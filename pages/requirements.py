@@ -6,10 +6,11 @@ from utils.supabase_client import get_supabase
 from utils.helpers import users_options, format_date
 
 STANDARDS = {
-    "ISO 9001":  "ISO9001",
-    "ISO 14001": "ISO14001",
-    "ISO 45001": "ISO45001",
-    "BRCGS":     "BRCGS",
+    "All Standards": None,
+    "ISO 9001":       "ISO9001",
+    "ISO 14001":      "ISO14001",
+    "ISO 45001":      "ISO45001",
+    "BRCGS":          "BRCGS",
 }
 
 DOC_TYPES      = ["Form", "Work Instruction", "Process", "Procedure", "Policy", "Record", "Other"]
@@ -24,48 +25,73 @@ def show():
     st.title("📘 Requirements Register")
     st.caption("ISO 9001 · ISO 14001 · ISO 45001 · BRCGS — document availability and review tracker")
 
-    # ── TABS declared immediately — before any logic or widgets ──
+    # ── TABS declared first ───────────────────────────────────
     tab_main, tab_add, tab_manage = st.tabs([
         "📋 Requirements",
         "➕ Add Requirement",
         "⚙️ Manage / Edit / Delete",
     ])
 
+    # ── Load departments once ─────────────────────────────────
+    depts_res = sb.table("departments").select("id, name").order("name").execute()
+    depts     = depts_res.data or []
+    dept_map  = {d["name"]: d["id"] for d in depts}   # name → id
+    dept_id_map = {d["id"]: d["name"] for d in depts} # id   → name
+    dept_options = ["All Departments"] + [d["name"] for d in depts]
+
     # ══════════════════════════════════════════════════════════
     # TAB 1 — REQUIREMENTS LIST
     # ══════════════════════════════════════════════════════════
     with tab_main:
-        # Filters
-        c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1.5])
-        with c1:
+        # ── Filters ──────────────────────────────────────────
+        fc1, fc2, fc3, fc4, fc5 = st.columns([1.2, 1.2, 1, 1, 1.5])
+        with fc1:
             std_label = st.selectbox("Standard", list(STANDARDS.keys()), key="req_std")
             std_code  = STANDARDS[std_label]
-        with c2:
+        with fc2:
+            dept_label = st.selectbox("Department", dept_options, key="req_dept")
+        with fc3:
             avail_filter = st.selectbox("Availability", ["All", "✅ Available", "❌ Missing"], key="req_avail")
-        with c3:
+        with fc4:
             review_filter = st.selectbox("Review Due", ["All", "Overdue", "Due this month", "Up to date"], key="req_review")
-        with c4:
+        with fc5:
             search = st.text_input("🔍 Search clause / keyword", key="req_search")
 
-        # Fetch requirements
-        res  = sb.table("requirements").select("*, profiles(full_name)").eq("standard", std_code).order("clause_number").execute()
-        reqs = res.data or []
+        # ── Fetch requirements ────────────────────────────────
+        query = sb.table("requirements").select("*, profiles(full_name)")
+        if std_code:
+            query = query.eq("standard", std_code)
+        reqs = query.order("clause_number").execute().data or []
 
-        # Fetch attached documents
+        # ── Fetch department links ────────────────────────────
         req_ids  = [r["id"] for r in reqs]
+        dept_links_map = {}  # requirement_id → [dept_ids]
+        if req_ids:
+            links_res = sb.table("requirement_departments").select("requirement_id, department_id").in_("requirement_id", req_ids).execute()
+            for lnk in (links_res.data or []):
+                dept_links_map.setdefault(lnk["requirement_id"], []).append(lnk["department_id"])
+
+        # ── Fetch attached documents ──────────────────────────
         docs_map = {}
         if req_ids:
             docs_res = sb.table("requirement_documents").select("*").in_("requirement_id", req_ids).execute()
             for d in (docs_res.data or []):
                 docs_map.setdefault(d["requirement_id"], []).append(d)
 
-        # Apply filters
+        # ── Apply filters ─────────────────────────────────────
         today    = date.today()
         filtered = []
         for r in reqs:
-            has_docs = bool(docs_map.get(r["id"]))
-            nrd      = r.get("next_review_due")
-            nrd_date = date.fromisoformat(nrd) if nrd else None
+            has_docs  = bool(docs_map.get(r["id"]))
+            nrd       = r.get("next_review_due")
+            nrd_date  = date.fromisoformat(nrd) if nrd else None
+            req_depts = dept_links_map.get(r["id"], [])
+
+            # Department filter
+            if dept_label != "All Departments":
+                dept_id = dept_map.get(dept_label)
+                if dept_id not in req_depts:
+                    continue
 
             if avail_filter == "✅ Available" and not has_docs: continue
             if avail_filter == "❌ Missing"   and has_docs:     continue
@@ -79,22 +105,22 @@ def show():
                    s not in (r.get("clause_title","")  or "").lower() and \
                    s not in (r.get("description","")   or "").lower():
                     continue
-            filtered.append((r, has_docs, nrd_date))
 
-        # Metrics
+            filtered.append((r, has_docs, nrd_date, req_depts))
+
+        # ── Metrics ───────────────────────────────────────────
         total     = len(filtered)
-        available = sum(1 for _, h, _ in filtered if h)
+        available = sum(1 for _, h, _, _ in filtered if h)
         missing   = total - available
-        overdue_r = sum(1 for _, _, nd in filtered if nd and nd < today)
+        overdue_r = sum(1 for _, _, nd, _ in filtered if nd and nd < today)
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Clauses",       total)
-        m2.metric("✅ Available",         available)
-        m3.metric("❌ Missing",           missing)
-        m4.metric("🔴 Overdue Reviews",   overdue_r)
+        m1.metric("Total Clauses",      total)
+        m2.metric("✅ Available",        available)
+        m3.metric("❌ Missing",          missing)
+        m4.metric("🔴 Overdue Reviews",  overdue_r)
 
-        # 7-day warning banner
-        due_soon = [(r, nd) for r, _, nd in filtered if nd and today <= nd <= today + timedelta(days=7)]
+        due_soon = [(r, nd) for r, _, nd, _ in filtered if nd and today <= nd <= today + timedelta(days=7)]
         if due_soon:
             clauses = ", ".join(r["clause_number"] for r, _ in due_soon)
             st.warning(f"⏰ {len(due_soon)} clause(s) due for review within 7 days: **{clauses}**")
@@ -104,16 +130,17 @@ def show():
         if not filtered:
             st.info("No clauses match your filters.")
         else:
-            for r, has_docs, nrd_date in filtered:
-                docs        = docs_map.get(r["id"], [])
-                owner       = (r.get("profiles") or {}).get("full_name", "—")
-                status_icon = "✅" if has_docs else "❌"
-                review_str  = format_date(nrd_date) if nrd_date else "—"
+            for r, has_docs, nrd_date, req_depts in filtered:
+                docs         = docs_map.get(r["id"], [])
+                owner        = (r.get("profiles") or {}).get("full_name", "—")
+                status_icon  = "✅" if has_docs else "❌"
+                review_str   = format_date(nrd_date) if nrd_date else "—"
                 overdue_flag = " 🔴" if nrd_date and nrd_date < today else ""
+                dept_names   = " · ".join(dept_id_map.get(did, "?") for did in req_depts) or "—"
 
                 title = (
                     f"{status_icon} **{r['clause_number']}** — {r['clause_title']}  "
-                    f"|  Owner: {owner}  |  Next Review: {review_str}{overdue_flag}"
+                    f"|  {dept_names}  |  Owner: {owner}  |  Next Review: {review_str}{overdue_flag}"
                 )
 
                 with st.expander(title, expanded=False):
@@ -121,7 +148,8 @@ def show():
 
                     mc1, mc2, mc3 = st.columns(3)
                     with mc1:
-                        st.markdown(f"**Standard:** {std_label}")
+                        st.markdown(f"**Standard:** {r.get('standard','—')}")
+                        st.markdown(f"**Departments:** {dept_names}")
                         st.markdown(f"**Review Frequency:** {r.get('review_frequency','—') or '—'}")
                     with mc2:
                         st.markdown(f"**Last Reviewed:** {format_date(r.get('last_reviewed'))}")
@@ -148,7 +176,7 @@ def show():
                     else:
                         st.info("No documents uploaded yet.")
 
-                    # Edit + upload form (write users only)
+                    # Edit + upload form
                     if can_write():
                         st.markdown("---")
                         with st.form(f"req_{r['id']}"):
@@ -159,7 +187,7 @@ def show():
                                 new_owner   = st.selectbox("Assign Owner", list(owner_opts.keys()),
                                     index=list(owner_opts.keys()).index(current_key), key=f"own_{r['id']}")
                                 review_freq = st.selectbox("Review Frequency", REVIEW_OPTIONS,
-                                    index=REVIEW_OPTIONS.index(r.get("review_frequency", "Annual") or "Annual"),
+                                    index=REVIEW_OPTIONS.index(r.get("review_frequency","Annual") or "Annual"),
                                     key=f"freq_{r['id']}")
                             with fc2:
                                 last_reviewed = st.date_input("Last Reviewed",
@@ -196,7 +224,8 @@ def show():
                                 if ufile:
                                     profile      = get_profile()
                                     file_bytes   = ufile.read()
-                                    storage_path = f"{std_code}/{r['clause_number']}/{ufile.name}"
+                                    std_code_upload = r.get("standard","general")
+                                    storage_path = f"{std_code_upload}/{r['clause_number']}/{ufile.name}"
                                     sb.storage.from_("requirements").upload(storage_path, file_bytes, {"upsert": "true"})
                                     file_url = sb.storage.from_("requirements").get_public_url(storage_path)
                                     sb.table("requirement_documents").insert({
@@ -226,12 +255,13 @@ def show():
                 c1, c2 = st.columns(2)
                 with c1:
                     new_std    = st.selectbox("Standard", list(STANDARDS.keys()), key="add_std")
-                    new_clause = st.text_input("Clause Number *", placeholder="e.g. 4.1")
-                    new_title  = st.text_input("Clause Title *",  placeholder="e.g. Context of the organization")
+                    new_clause = st.text_input("Clause Number *", placeholder="e.g. PR-10")
+                    new_title  = st.text_input("Clause Title *", placeholder="e.g. My Process")
                 with c2:
-                    new_freq   = st.selectbox("Review Frequency", REVIEW_OPTIONS)
+                    new_freq  = st.selectbox("Review Frequency", REVIEW_OPTIONS)
                     owner_opts = users_options()
                     new_owner  = st.selectbox("Owner", list(owner_opts.keys()))
+                    new_depts  = st.multiselect("Departments", [d["name"] for d in depts])
 
                 new_desc  = st.text_area("Description", height=100)
                 new_notes = st.text_input("Notes")
@@ -243,8 +273,8 @@ def show():
                     st.error("Clause number and title are required.")
                 else:
                     try:
-                        sb.table("requirements").insert({
-                            "standard":         STANDARDS[new_std],
+                        res = sb.table("requirements").insert({
+                            "standard":         STANDARDS.get(new_std) or "ISO9001",
                             "clause_number":    new_clause,
                             "clause_title":     new_title,
                             "description":      new_desc or None,
@@ -252,6 +282,14 @@ def show():
                             "owner_id":         owner_opts[new_owner],
                             "notes":            new_notes or None,
                         }).execute()
+                        new_id = res.data[0]["id"]
+                        for dn in new_depts:
+                            did = dept_map.get(dn)
+                            if did:
+                                sb.table("requirement_departments").insert({
+                                    "requirement_id": new_id,
+                                    "department_id":  did,
+                                }).execute()
                         st.success(f"✅ Requirement {new_clause} added.")
                         st.rerun()
                     except Exception as e:
@@ -266,18 +304,37 @@ def show():
         else:
             st.markdown("#### Edit or Delete Requirements")
 
-            std_m  = st.selectbox("Standard", list(STANDARDS.keys()), key="mgmt_std")
-            code_m = STANDARDS[std_m]
+            col_std, col_dept = st.columns(2)
+            with col_std:
+                std_m  = st.selectbox("Standard", list(STANDARDS.keys()), key="mgmt_std")
+                code_m = STANDARDS[std_m]
+            with col_dept:
+                dept_m = st.selectbox("Department", dept_options, key="mgmt_dept")
 
-            res_m  = sb.table("requirements").select("*").eq("standard", code_m).order("clause_number").execute()
-            reqs_m = res_m.data or []
+            query_m = sb.table("requirements").select("*")
+            if code_m:
+                query_m = query_m.eq("standard", code_m)
+            reqs_m = query_m.order("clause_number").execute().data or []
+
+            # Filter by department if selected
+            if dept_m != "All Departments" and reqs_m:
+                did_m     = dept_map.get(dept_m)
+                rids_m    = [r["id"] for r in reqs_m]
+                links_m   = sb.table("requirement_departments").select("requirement_id").eq("department_id", did_m).in_("requirement_id", rids_m).execute().data or []
+                linked_ids = {l["requirement_id"] for l in links_m}
+                reqs_m    = [r for r in reqs_m if r["id"] in linked_ids]
 
             if not reqs_m:
-                st.info("No requirements found for this standard.")
+                st.info("No requirements found.")
             else:
                 opts_m    = {f"{r['clause_number']} — {r['clause_title']}": r for r in reqs_m}
                 sel_label = st.selectbox("Select requirement to edit / delete", list(opts_m.keys()))
                 sel_r     = opts_m[sel_label]
+
+                # Current departments for this requirement
+                cur_links = sb.table("requirement_departments").select("department_id").eq("requirement_id", sel_r["id"]).execute().data or []
+                cur_dept_ids   = [l["department_id"] for l in cur_links]
+                cur_dept_names = [dept_id_map.get(did,"") for did in cur_dept_ids]
 
                 with st.form("edit_req"):
                     ec1, ec2 = st.columns(2)
@@ -285,16 +342,17 @@ def show():
                         e_clause = st.text_input("Clause Number", value=sel_r["clause_number"])
                         e_title  = st.text_input("Clause Title",  value=sel_r["clause_title"])
                         e_freq   = st.selectbox("Review Frequency", REVIEW_OPTIONS,
-                            index=REVIEW_OPTIONS.index(sel_r.get("review_frequency", "Annual") or "Annual"))
+                            index=REVIEW_OPTIONS.index(sel_r.get("review_frequency","Annual") or "Annual"))
+                        e_depts  = st.multiselect("Departments", [d["name"] for d in depts], default=cur_dept_names)
                     with ec2:
                         e_desc  = st.text_area("Description", value=sel_r.get("description","") or "", height=100)
                         e_notes = st.text_input("Notes", value=sel_r.get("notes","") or "")
 
                     col_save, col_del = st.columns(2)
                     with col_save:
-                        save_edit  = st.form_submit_button("💾 Save Changes",      use_container_width=True)
+                        save_edit  = st.form_submit_button("💾 Save Changes",       use_container_width=True)
                     with col_del:
-                        delete_req = st.form_submit_button("🗑️ Delete Requirement", use_container_width=True)
+                        delete_req = st.form_submit_button("🗑️ Delete Requirement",  use_container_width=True)
 
                 if save_edit:
                     try:
@@ -305,6 +363,17 @@ def show():
                             "review_frequency": e_freq,
                             "notes":            e_notes or None,
                         }).eq("id", sel_r["id"]).execute()
+
+                        # Update department links — delete all then reinsert
+                        sb.table("requirement_departments").delete().eq("requirement_id", sel_r["id"]).execute()
+                        for dn in e_depts:
+                            did = dept_map.get(dn)
+                            if did:
+                                sb.table("requirement_departments").insert({
+                                    "requirement_id": sel_r["id"],
+                                    "department_id":  did,
+                                }).execute()
+
                         st.success("✅ Requirement updated.")
                         st.rerun()
                     except Exception as e:
@@ -315,7 +384,8 @@ def show():
                         st.error("Only admins and quality managers can delete requirements.")
                     else:
                         try:
-                            sb.table("requirement_documents").delete().eq("requirement_id", sel_r["id"]).execute()
+                            sb.table("requirement_departments").delete().eq("requirement_id", sel_r["id"]).execute()
+                            sb.table("requirement_documents").delete().eq("requirement_id",  sel_r["id"]).execute()
                             sb.table("requirements").delete().eq("id", sel_r["id"]).execute()
                             st.success("✅ Requirement deleted.")
                             st.rerun()
