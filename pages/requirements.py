@@ -12,7 +12,7 @@ STANDARDS = {
     "BRCGS":     "BRCGS",
 }
 
-DOC_TYPES    = ["Form", "Work Instruction", "Process", "Procedure", "Policy", "Record", "Other"]
+DOC_TYPES      = ["Form", "Work Instruction", "Process", "Procedure", "Policy", "Record", "Other"]
 REVIEW_OPTIONS = ["None", "Monthly", "Quarterly", "Bi-Annual", "Annual"]
 
 
@@ -24,13 +24,18 @@ def show():
     st.title("📘 Requirements Register")
     st.caption("ISO 9001 · ISO 14001 · ISO 45001 · BRCGS — document availability and review tracker")
 
-    # ── TABS ─────────────────────────────────────────────────
-    tab_main, tab_add, tab_manage = st.tabs(["📋 Requirements", "➕ Add Requirement", "⚙️ Manage / Delete"])
+    # ── TABS declared immediately — before any logic or widgets ──
+    tab_main, tab_add, tab_manage = st.tabs([
+        "📋 Requirements",
+        "➕ Add Requirement",
+        "⚙️ Manage / Edit / Delete",
+    ])
 
     # ══════════════════════════════════════════════════════════
-    # TAB 1 — MAIN REQUIREMENTS LIST
+    # TAB 1 — REQUIREMENTS LIST
     # ══════════════════════════════════════════════════════════
     with tab_main:
+        # Filters
         c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1.5])
         with c1:
             std_label = st.selectbox("Standard", list(STANDARDS.keys()), key="req_std")
@@ -42,10 +47,11 @@ def show():
         with c4:
             search = st.text_input("🔍 Search clause / keyword", key="req_search")
 
-        # Fetch
+        # Fetch requirements
         res  = sb.table("requirements").select("*, profiles(full_name)").eq("standard", std_code).order("clause_number").execute()
         reqs = res.data or []
 
+        # Fetch attached documents
         req_ids  = [r["id"] for r in reqs]
         docs_map = {}
         if req_ids:
@@ -53,7 +59,7 @@ def show():
             for d in (docs_res.data or []):
                 docs_map.setdefault(d["requirement_id"], []).append(d)
 
-        # Filter
+        # Apply filters
         today    = date.today()
         filtered = []
         for r in reqs:
@@ -82,11 +88,12 @@ def show():
         overdue_r = sum(1 for _, _, nd in filtered if nd and nd < today)
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Clauses", total)
-        m2.metric("✅ Available",   available)
-        m3.metric("❌ Missing",     missing)
-        m4.metric("🔴 Overdue Reviews", overdue_r)
+        m1.metric("Total Clauses",       total)
+        m2.metric("✅ Available",         available)
+        m3.metric("❌ Missing",           missing)
+        m4.metric("🔴 Overdue Reviews",   overdue_r)
 
+        # 7-day warning banner
         due_soon = [(r, nd) for r, _, nd in filtered if nd and today <= nd <= today + timedelta(days=7)]
         if due_soon:
             clauses = ", ".join(r["clause_number"] for r, _ in due_soon)
@@ -98,10 +105,10 @@ def show():
             st.info("No clauses match your filters.")
         else:
             for r, has_docs, nrd_date in filtered:
-                docs         = docs_map.get(r["id"], [])
-                owner        = (r.get("profiles") or {}).get("full_name", "—")
-                status_icon  = "✅" if has_docs else "❌"
-                review_str   = format_date(nrd_date) if nrd_date else "—"
+                docs        = docs_map.get(r["id"], [])
+                owner       = (r.get("profiles") or {}).get("full_name", "—")
+                status_icon = "✅" if has_docs else "❌"
+                review_str  = format_date(nrd_date) if nrd_date else "—"
                 overdue_flag = " 🔴" if nrd_date and nrd_date < today else ""
 
                 title = (
@@ -123,6 +130,7 @@ def show():
                         st.markdown(f"**Owner:** {owner}")
                         st.markdown(f"**Notes:** {r.get('notes','—') or '—'}")
 
+                    # Attached documents
                     if docs:
                         st.markdown("**📎 Attached Documents:**")
                         for d in docs:
@@ -134,12 +142,13 @@ def show():
                                 st.markdown(label)
                             with col_b:
                                 if can_write():
-                                    if st.button("🗑️", key=f"del_{d['id']}", help="Remove"):
+                                    if st.button("🗑️", key=f"del_{d['id']}", help="Remove document"):
                                         sb.table("requirement_documents").delete().eq("id", d["id"]).execute()
                                         st.rerun()
                     else:
                         st.info("No documents uploaded yet.")
 
+                    # Edit + upload form (write users only)
                     if can_write():
                         st.markdown("---")
                         with st.form(f"req_{r['id']}"):
@@ -150,7 +159,7 @@ def show():
                                 new_owner   = st.selectbox("Assign Owner", list(owner_opts.keys()),
                                     index=list(owner_opts.keys()).index(current_key), key=f"own_{r['id']}")
                                 review_freq = st.selectbox("Review Frequency", REVIEW_OPTIONS,
-                                    index=REVIEW_OPTIONS.index(r.get("review_frequency","Annual") or "Annual"),
+                                    index=REVIEW_OPTIONS.index(r.get("review_frequency", "Annual") or "Annual"),
                                     key=f"freq_{r['id']}")
                             with fc2:
                                 last_reviewed = st.date_input("Last Reviewed",
@@ -166,23 +175,22 @@ def show():
                             with uc2:
                                 doc_ver = st.text_input("Version", placeholder="v1.0", key=f"dv_{r['id']}")
                             with uc3:
-                                # Accept ALL file types
                                 ufile = st.file_uploader("Choose any file", key=f"uf_{r['id']}")
 
                             save = st.form_submit_button("💾 Save", use_container_width=True)
 
                         if save:
-                            freq_days = {"Monthly":30,"Quarterly":90,"Bi-Annual":180,"Annual":365,"None":None}
+                            freq_days = {"Monthly": 30, "Quarterly": 90, "Bi-Annual": 180, "Annual": 365, "None": None}
                             days      = freq_days.get(review_freq)
                             next_due  = (last_reviewed + timedelta(days=days)) if (last_reviewed and days) else None
 
                             try:
                                 sb.table("requirements").update({
-                                    "owner_id":        owner_opts[new_owner],
+                                    "owner_id":         owner_opts[new_owner],
                                     "review_frequency": review_freq,
-                                    "last_reviewed":   last_reviewed.isoformat() if last_reviewed else None,
-                                    "next_review_due": next_due.isoformat() if next_due else None,
-                                    "notes":           notes or None,
+                                    "last_reviewed":    last_reviewed.isoformat() if last_reviewed else None,
+                                    "next_review_due":  next_due.isoformat() if next_due else None,
+                                    "notes":            notes or None,
                                 }).eq("id", r["id"]).execute()
 
                                 if ufile:
@@ -217,15 +225,15 @@ def show():
             with st.form("add_req", clear_on_submit=True):
                 c1, c2 = st.columns(2)
                 with c1:
-                    new_std     = st.selectbox("Standard", list(STANDARDS.keys()), key="add_std")
-                    new_clause  = st.text_input("Clause Number *", placeholder="e.g. 4.1")
-                    new_title   = st.text_input("Clause Title *", placeholder="e.g. Context of the organization")
+                    new_std    = st.selectbox("Standard", list(STANDARDS.keys()), key="add_std")
+                    new_clause = st.text_input("Clause Number *", placeholder="e.g. 4.1")
+                    new_title  = st.text_input("Clause Title *",  placeholder="e.g. Context of the organization")
                 with c2:
-                    new_freq    = st.selectbox("Review Frequency", REVIEW_OPTIONS)
-                    owner_opts  = users_options()
-                    new_owner   = st.selectbox("Owner", list(owner_opts.keys()))
+                    new_freq   = st.selectbox("Review Frequency", REVIEW_OPTIONS)
+                    owner_opts = users_options()
+                    new_owner  = st.selectbox("Owner", list(owner_opts.keys()))
 
-                new_desc = st.text_area("Description", height=100)
+                new_desc  = st.text_area("Description", height=100)
                 new_notes = st.text_input("Notes")
 
                 submitted = st.form_submit_button("➕ Add Requirement")
@@ -236,13 +244,13 @@ def show():
                 else:
                     try:
                         sb.table("requirements").insert({
-                            "standard":        STANDARDS[new_std],
-                            "clause_number":   new_clause,
-                            "clause_title":    new_title,
-                            "description":     new_desc or None,
+                            "standard":         STANDARDS[new_std],
+                            "clause_number":    new_clause,
+                            "clause_title":     new_title,
+                            "description":      new_desc or None,
                             "review_frequency": new_freq,
-                            "owner_id":        owner_opts[new_owner],
-                            "notes":           new_notes or None,
+                            "owner_id":         owner_opts[new_owner],
+                            "notes":            new_notes or None,
                         }).execute()
                         st.success(f"✅ Requirement {new_clause} added.")
                         st.rerun()
@@ -265,10 +273,10 @@ def show():
             reqs_m = res_m.data or []
 
             if not reqs_m:
-                st.info("No requirements found.")
+                st.info("No requirements found for this standard.")
             else:
-                opts_m = {f"{r['clause_number']} — {r['clause_title']}": r for r in reqs_m}
-                sel_label = st.selectbox("Select requirement to edit/delete", list(opts_m.keys()))
+                opts_m    = {f"{r['clause_number']} — {r['clause_title']}": r for r in reqs_m}
+                sel_label = st.selectbox("Select requirement to edit / delete", list(opts_m.keys()))
                 sel_r     = opts_m[sel_label]
 
                 with st.form("edit_req"):
@@ -277,25 +285,25 @@ def show():
                         e_clause = st.text_input("Clause Number", value=sel_r["clause_number"])
                         e_title  = st.text_input("Clause Title",  value=sel_r["clause_title"])
                         e_freq   = st.selectbox("Review Frequency", REVIEW_OPTIONS,
-                            index=REVIEW_OPTIONS.index(sel_r.get("review_frequency","Annual") or "Annual"))
+                            index=REVIEW_OPTIONS.index(sel_r.get("review_frequency", "Annual") or "Annual"))
                     with ec2:
                         e_desc  = st.text_area("Description", value=sel_r.get("description","") or "", height=100)
                         e_notes = st.text_input("Notes", value=sel_r.get("notes","") or "")
 
                     col_save, col_del = st.columns(2)
                     with col_save:
-                        save_edit = st.form_submit_button("💾 Save Changes", use_container_width=True)
+                        save_edit  = st.form_submit_button("💾 Save Changes",      use_container_width=True)
                     with col_del:
                         delete_req = st.form_submit_button("🗑️ Delete Requirement", use_container_width=True)
 
                 if save_edit:
                     try:
                         sb.table("requirements").update({
-                            "clause_number":   e_clause,
-                            "clause_title":    e_title,
-                            "description":     e_desc or None,
+                            "clause_number":    e_clause,
+                            "clause_title":     e_title,
+                            "description":      e_desc or None,
                             "review_frequency": e_freq,
-                            "notes":           e_notes or None,
+                            "notes":            e_notes or None,
                         }).eq("id", sel_r["id"]).execute()
                         st.success("✅ Requirement updated.")
                         st.rerun()
