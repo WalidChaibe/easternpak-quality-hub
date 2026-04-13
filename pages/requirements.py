@@ -58,10 +58,17 @@ def show():
             search = st.text_input("🔍 Search clause / keyword", key="req_search")
 
         # ── Fetch requirements ────────────────────────────────
-        query = sb.table("requirements").select("*, profiles(full_name)")
+        query = sb.table("requirements").select("*")
         if std_code:
             query = query.eq("standard", std_code)
         reqs = query.order("clause_number").execute().data or []
+
+        # Fetch owner names separately
+        owner_ids  = list({r["owner_id"] for r in reqs if r.get("owner_id")})
+        owners_map = {}
+        if owner_ids:
+            owners_res = sb.table("profiles").select("id, full_name").in_("id", owner_ids).execute()
+            owners_map = {p["id"]: p["full_name"] for p in (owners_res.data or [])}
 
         # ── Fetch department links ────────────────────────────
         req_ids  = [r["id"] for r in reqs]
@@ -145,7 +152,7 @@ def show():
         else:
             for r, has_docs, nrd_date, req_depts, marked_done, is_available in filtered:
                 docs         = docs_map.get(r["id"], [])
-                owner        = (r.get("profiles") or {}).get("full_name", "—")
+                owner        = owners_map.get(r.get("owner_id"), "—")
                 if marked_done and not has_docs:
                     status_icon = "✅"
                 elif is_available:
