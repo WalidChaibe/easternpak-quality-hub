@@ -259,23 +259,24 @@ def show():
 
                         if save:
                             freq_days = {"Monthly": 30, "Quarterly": 90, "Bi-Annual": 180, "Annual": 365, "None": None}
-                            days      = freq_days.get(review_freq)
-                            next_due  = (last_reviewed + timedelta(days=days)) if (last_reviewed and days) else None
-
+                            days         = freq_days.get(review_freq)
+                            next_due     = (last_reviewed + timedelta(days=days)) if (last_reviewed and days) else None
+                            new_owner_id = owner_opts.get(new_owner)
+                            update_payload = {
+                                "review_frequency": review_freq,
+                                "last_reviewed":    last_reviewed.isoformat() if last_reviewed else None,
+                                "next_review_due":  next_due.isoformat() if next_due else None,
+                                "notes":            notes or None,
+                            }
+                            if new_owner_id:
+                                update_payload["owner_id"] = new_owner_id
                             try:
-                                sb.table("requirements").update({
-                                    "owner_id":         owner_opts[new_owner],
-                                    "review_frequency": review_freq,
-                                    "last_reviewed":    last_reviewed.isoformat() if last_reviewed else None,
-                                    "next_review_due":  next_due.isoformat() if next_due else None,
-                                    "notes":            notes or None,
-                                }).eq("id", r["id"]).execute()
-
+                                sb.table("requirements").update(update_payload).eq("id", r["id"]).execute()
                                 if ufile:
-                                    profile      = get_profile()
-                                    file_bytes   = ufile.read()
-                                    std_code_upload = r.get("standard","general")
-                                    storage_path = f"{std_code_upload}/{r['clause_number']}/{ufile.name}"
+                                    profile         = get_profile()
+                                    file_bytes      = ufile.read()
+                                    std_code_upload = r.get("standard", "general")
+                                    storage_path    = f"{std_code_upload}/{r['clause_number']}/{ufile.name}"
                                     sb.storage.from_("requirements").upload(storage_path, file_bytes, {"upsert": "true"})
                                     file_url = sb.storage.from_("requirements").get_public_url(storage_path)
                                     sb.table("requirement_documents").insert({
@@ -285,13 +286,12 @@ def show():
                                         "doc_type":       doc_type,
                                         "doc_code":       doc_code or None,
                                         "version":        doc_ver or None,
-                                        "uploaded_by":    profile["id"],
+                                        "uploaded_by":    profile["id"] if profile else None,
                                     }).execute()
-
                                 st.success("✅ Saved.")
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"Error: {e}")
+                                st.error(f"Error saving: {e}")
 
     # ══════════════════════════════════════════════════════════
     # TAB 2 — ADD NEW REQUIREMENT
