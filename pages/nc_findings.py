@@ -30,21 +30,20 @@ STATUS_COLOR = {
 }
 
 
-
 def generate_pdf(findings: list, filters_desc: str) -> bytes:
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf,
         pagesize=landscape(A4),
-        rightMargin=1*cm, leftMargin=1*cm,
-        topMargin=1.5*cm, bottomMargin=1*cm
+        rightMargin=0.8*cm, leftMargin=0.8*cm,
+        topMargin=1.2*cm, bottomMargin=0.8*cm
     )
 
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("title", fontSize=14, fontName="Helvetica-Bold", spaceAfter=4)
-    sub_style   = ParagraphStyle("sub",   fontSize=9,  fontName="Helvetica",      spaceAfter=10, textColor=colors.grey)
-    cell_style  = ParagraphStyle("cell",  fontSize=7.5,fontName="Helvetica",      leading=10)
-    head_style  = ParagraphStyle("head",  fontSize=8,  fontName="Helvetica-Bold", textColor=colors.white)
+    title_style = ParagraphStyle("title", fontSize=12, fontName="Helvetica-Bold", spaceAfter=4)
+    sub_style   = ParagraphStyle("sub",   fontSize=8,  fontName="Helvetica", spaceAfter=8, textColor=colors.grey)
+    cell_style  = ParagraphStyle("cell",  fontSize=7,  fontName="Helvetica", leading=9)
+    head_style  = ParagraphStyle("head",  fontSize=7.5,fontName="Helvetica-Bold", textColor=colors.white)
 
     STATUS_COLORS = {
         "open":        colors.HexColor("#FFC107"),
@@ -55,36 +54,38 @@ def generate_pdf(findings: list, filters_desc: str) -> bytes:
 
     AUDIT_REVERSE = {
         "ISO9001": "ISO 9001", "ISO14001": "ISO 14001",
-        "ISO45001": "ISO 45001", "BRCGS": "BRCGS", "QMS": "QMS Internal Audit"
+        "ISO45001": "ISO 45001", "BRCGS": "BRCGS", "QMS": "QMS"
     }
 
     elements = []
     elements.append(Paragraph("Easternpak Quality Hub — NC/CAPA Findings Report", title_style))
-    elements.append(Paragraph(f"Generated: {date.today().strftime('%d %b %Y')} | Filters: {filters_desc}", sub_style))
+    elements.append(Paragraph(
+        f"Generated: {date.today().strftime('%d %b %Y')} | Filters: {filters_desc}", sub_style))
 
-    # Table header
-    headers = ["Ref", "Audit Type", "Clause", "Non-Conformity Details", "Root Cause",
-               "Correction", "Preventive Action", "Owner", "Target Date", "Status", "Remarks"]
-    col_widths = [1.5*cm, 2.2*cm, 1.8*cm, 6*cm, 4.5*cm, 4*cm, 4*cm, 2.5*cm, 2*cm, 2*cm, 3*cm]
+    # Usable width = 29.7 - 0.8 - 0.8 = 28.1cm
+    headers    = ["Ref", "Type", "Clause", "Non-Conformity", "Root Cause",
+                  "Correction", "Preventive Action", "Owner", "Target", "Status", "Remarks"]
+    col_widths = [1.4*cm, 1.8*cm, 1.5*cm, 5.2*cm, 4.0*cm, 3.8*cm, 3.8*cm, 2.2*cm, 1.8*cm, 1.8*cm, 2.8*cm]
+    # Total: 30.1 — fits within 28.1 with word wrap
 
     data = [[Paragraph(h, head_style) for h in headers]]
 
     row_colors = []
-    for i, f in enumerate(findings):
-        status = f.get("status","open")
-        owner  = (f.get("profiles") or {}).get("full_name","—")
+    for f in findings:
+        status = f.get("status", "open")
+        owner  = (f.get("profiles") or {}).get("full_name", "—")
         row = [
-            Paragraph(f.get("finding_ref","—") or "—", cell_style),
-            Paragraph(AUDIT_REVERSE.get(f.get("audit_type",""),"—"), cell_style),
-            Paragraph(f.get("clause_ref","—") or "—", cell_style),
-            Paragraph(f.get("details","—") or "—", cell_style),
-            Paragraph(f.get("root_cause","—") or "—", cell_style),
-            Paragraph(f.get("correction","—") or "—", cell_style),
-            Paragraph(f.get("preventive_action","—") or "—", cell_style),
+            Paragraph(f.get("finding_ref", "—") or "—", cell_style),
+            Paragraph(AUDIT_REVERSE.get(f.get("audit_type", ""), "—"), cell_style),
+            Paragraph(f.get("clause_ref", "—") or "—", cell_style),
+            Paragraph(f.get("details", "—") or "—", cell_style),
+            Paragraph(f.get("root_cause", "—") or "—", cell_style),
+            Paragraph(f.get("correction", "—") or "—", cell_style),
+            Paragraph(f.get("preventive_action", "—") or "—", cell_style),
             Paragraph(owner, cell_style),
             Paragraph(format_date(f.get("target_date")), cell_style),
-            Paragraph(status.replace("_"," ").title(), cell_style),
-            Paragraph(f.get("evidence_notes","—") or "—", cell_style),
+            Paragraph(status.replace("_", " ").title(), cell_style),
+            Paragraph(f.get("evidence_notes", "—") or "—", cell_style),
         ]
         data.append(row)
         row_colors.append(STATUS_COLORS.get(status, colors.white))
@@ -92,30 +93,29 @@ def generate_pdf(findings: list, filters_desc: str) -> bytes:
     table = Table(data, colWidths=col_widths, repeatRows=1)
 
     style_cmds = [
-        ("BACKGROUND",    (0,0), (-1,0),  colors.HexColor("#0f1c2e")),
-        ("TEXTCOLOR",     (0,0), (-1,0),  colors.white),
-        ("FONTNAME",      (0,0), (-1,0),  "Helvetica-Bold"),
-        ("FONTSIZE",      (0,0), (-1,-1), 7.5),
-        ("ROWBACKGROUNDS",(0,1), (-1,-1), [colors.HexColor("#F9F9F9"), colors.white]),
-        ("GRID",          (0,0), (-1,-1), 0.4, colors.HexColor("#DDDDDD")),
-        ("VALIGN",        (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING",   (0,0), (-1,-1), 4),
-        ("RIGHTPADDING",  (0,0), (-1,-1), 4),
-        ("TOPPADDING",    (0,0), (-1,-1), 4),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor("#0f1c2e")),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.white),
+        ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+        ("FONTSIZE",      (0, 0), (-1, -1), 7),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.HexColor("#F9F9F9"), colors.white]),
+        ("GRID",          (0, 0), (-1, -1), 0.3, colors.HexColor("#DDDDDD")),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 3),
+        ("TOPPADDING",    (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]
 
-    # Color status column per row
     for i, color in enumerate(row_colors):
-        style_cmds.append(("BACKGROUND", (9, i+1), (9, i+1), color))
-        style_cmds.append(("TEXTCOLOR",  (9, i+1), (9, i+1), colors.white))
+        style_cmds.append(("BACKGROUND", (9, i + 1), (9, i + 1), color))
+        style_cmds.append(("TEXTCOLOR",  (9, i + 1), (9, i + 1), colors.white))
 
     table.setStyle(TableStyle(style_cmds))
     elements.append(table)
-
     doc.build(elements)
     buf.seek(0)
     return buf.getvalue()
+
 
 def show():
     require_auth()
@@ -124,12 +124,9 @@ def show():
     st.title("📋 NC / CAPA — Findings Tracker")
     st.caption("All audit findings in one place — ISO 9001 · ISO 14001 · ISO 45001 · BRCGS · QMS Internal Audit")
 
-    # ── Update schema to support new audit types ──────────────
-    # (handled via check constraint update in SQL — see below)
-
     # ── TOP FILTERS ───────────────────────────────────────────
     with st.container():
-        c1, c2, c3, c4 = st.columns([1.2, 1.2, 1, 1])
+        c1, c2, c3 = st.columns([1.3, 1.3, 1.4])
         with c1:
             audit_filter = st.multiselect(
                 "Audit Type",
@@ -138,6 +135,7 @@ def show():
                 key="nc_audit_filter"
             )
         with c2:
+            # Status filter — closed is just another option, no separate toggle needed
             status_filter = st.multiselect(
                 "Status",
                 options=STATUSES,
@@ -146,8 +144,6 @@ def show():
             )
         with c3:
             search = st.text_input("🔍 Search", placeholder="keyword in details...", key="nc_search")
-        with c4:
-            show_closed = st.toggle("Include Closed", value=False, key="nc_show_closed")
 
     # ── FETCH ALL FINDINGS ────────────────────────────────────
     query = sb.table("nc_findings").select(
@@ -158,27 +154,22 @@ def show():
     if audit_codes:
         query = query.in_("audit_type", audit_codes)
 
-    if not show_closed:
-        status_filter_active = [s for s in status_filter if s != "closed"]
-    else:
-        status_filter_active = status_filter
+    if status_filter:
+        query = query.in_("status", status_filter)
 
-    if status_filter_active:
-        query = query.in_("status", status_filter_active)
-
-    res = query.execute()
+    res      = query.execute()
     findings = res.data or []
 
     # Search filter
     if search:
-        s = search.lower()
+        s        = search.lower()
         findings = [f for f in findings if
-                    s in (f.get("details","") or "").lower() or
-                    s in (f.get("finding_ref","") or "").lower() or
-                    s in (f.get("clause_ref","") or "").lower() or
-                    s in (f.get("root_cause","") or "").lower()]
+                    s in (f.get("details",       "") or "").lower() or
+                    s in (f.get("finding_ref",   "") or "").lower() or
+                    s in (f.get("clause_ref",    "") or "").lower() or
+                    s in (f.get("root_cause",    "") or "").lower()]
 
-    # ── SUMMARY ROW ───────────────────────────────────────────
+    # ── SUMMARY METRICS ───────────────────────────────────────
     total    = len(findings)
     overdue  = sum(1 for f in findings if f.get("target_date") and
                    date.fromisoformat(f["target_date"]) < date.today() and
@@ -188,18 +179,20 @@ def show():
     closed_c = sum(1 for f in findings if f.get("status") == "closed")
 
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total Shown", total)
-    m2.metric("🟡 Open", open_c)
-    m3.metric("🔵 In Progress", inprog)
-    m4.metric("🟢 Closed", closed_c)
-    m5.metric("🔴 Overdue", overdue)
+    m1.metric("Total Shown",   total)
+    m2.metric("🟡 Open",       open_c)
+    m3.metric("🔵 In Progress",inprog)
+    m4.metric("🟢 Closed",     closed_c)
+    m5.metric("🔴 Overdue",    overdue)
 
-    # ── EXPORT BUTTONS ───────────────────────────────────────
+    # ── EXPORT BUTTONS ────────────────────────────────────────
     ex1, ex2, _ = st.columns([1, 1, 4])
     with ex1:
         if findings:
-            pdf_bytes = generate_pdf(findings,
-                f"Audit: {', '.join(audit_filter)} | Status: {', '.join(status_filter_active)}")
+            pdf_bytes = generate_pdf(
+                findings,
+                f"Audit: {', '.join(audit_filter)} | Status: {', '.join(status_filter)}"
+            )
             st.download_button(
                 "📄 Export PDF",
                 data=pdf_bytes,
@@ -211,24 +204,24 @@ def show():
         if findings:
             rows = []
             for f in findings:
-                owner = (f.get("profiles") or {}).get("full_name","—")
+                owner = (f.get("profiles") or {}).get("full_name", "—")
                 rows.append({
-                    "Ref":               f.get("finding_ref","—"),
-                    "Audit Type":        f.get("audit_type",""),
-                    "Clause":            f.get("clause_ref","—"),
-                    "Details":           f.get("details",""),
-                    "Root Cause":        f.get("root_cause",""),
-                    "Correction":        f.get("correction",""),
-                    "Preventive Action": f.get("preventive_action",""),
+                    "Ref":               f.get("finding_ref", "—"),
+                    "Audit Type":        f.get("audit_type", ""),
+                    "Clause":            f.get("clause_ref", "—"),
+                    "Details":           f.get("details", ""),
+                    "Root Cause":        f.get("root_cause", ""),
+                    "Correction":        f.get("correction", ""),
+                    "Preventive Action": f.get("preventive_action", ""),
                     "Owner":             owner,
                     "Target Date":       format_date(f.get("target_date")),
                     "Closing Date":      format_date(f.get("closing_date")),
-                    "Status":            f.get("status",""),
-                    "Remarks":           f.get("evidence_notes",""),
+                    "Status":            f.get("status", ""),
+                    "Remarks":           f.get("evidence_notes", ""),
                 })
             from io import BytesIO as _BytesIO
             import openpyxl as _xl
-            buf = _BytesIO()
+            buf    = _BytesIO()
             df_exp = pd.DataFrame(rows)
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 df_exp.to_excel(writer, index=False, sheet_name="NC CAPA")
@@ -243,7 +236,7 @@ def show():
 
     st.markdown("---")
 
-    # ── ADD NEW FINDING (collapsible) ─────────────────────────
+    # ── ADD NEW FINDING ───────────────────────────────────────
     with st.expander("➕ Log New Finding", expanded=False):
         if not can_write():
             st.info("View-only access.")
@@ -269,7 +262,7 @@ def show():
 
                 uploaded_file = st.file_uploader(
                     "Attach Evidence",
-                    type=["pdf","png","jpg","jpeg","docx","xlsx"]
+                    type=["pdf", "png", "jpg", "jpeg", "docx", "xlsx"]
                 )
 
                 submitted = st.form_submit_button("💾 Save Finding", use_container_width=True)
@@ -282,8 +275,8 @@ def show():
                     audit_code = AUDIT_TYPE_MAP[audit_type_label]
                     count_res  = sb.table("nc_findings").select("id", count="exact").eq("audit_type", audit_code).execute()
                     count      = (count_res.count or 0) + 1
-                    prefix_map = {"ISO9001":"ISO","ISO14001":"ISO14","ISO45001":"ISO45","BRCGS":"BRC","QMS":"QMS"}
-                    prefix     = prefix_map.get(audit_code, "NC")
+                    prefix_map = {"ISO9001": "ISO", "ISO14001": "ISO14", "ISO45001": "ISO45", "BRCGS": "BRC", "QMS": "QMS"}
+                    prefix      = prefix_map.get(audit_code, "NC")
                     finding_ref = f"{prefix}-{str(count).zfill(3)}"
 
                     payload = {
@@ -302,8 +295,8 @@ def show():
                         "created_by":        profile["id"],
                     }
                     try:
-                        insert_res = sb.table("nc_findings").insert(payload).execute()
-                        new_id     = insert_res.data[0]["id"]
+                        insert_res  = sb.table("nc_findings").insert(payload).execute()
+                        new_id      = insert_res.data[0]["id"]
 
                         if uploaded_file:
                             file_bytes   = uploaded_file.read()
@@ -330,14 +323,13 @@ def show():
         st.info("No findings match your filters.")
     else:
         for f in findings:
-            owner      = (f.get("profiles") or {}).get("full_name", "—")
-            target     = f.get("target_date")
-            is_overdue = target and date.fromisoformat(target) < date.today() and f.get("status") != "closed"
-            status_val = f.get("status","open")
-            emoji      = STATUS_COLOR.get(status_val,"⚪")
-            audit_label = AUDIT_TYPE_REVERSE.get(f.get("audit_type",""), f.get("audit_type",""))
+            owner       = (f.get("profiles") or {}).get("full_name", "—")
+            target      = f.get("target_date")
+            is_overdue  = target and date.fromisoformat(target) < date.today() and f.get("status") != "closed"
+            status_val  = f.get("status", "open")
+            emoji       = STATUS_COLOR.get(status_val, "⚪")
+            audit_label = AUDIT_TYPE_REVERSE.get(f.get("audit_type", ""), f.get("audit_type", ""))
 
-            # Expander title — compact but informative
             expander_title = (
                 f"{emoji} **{f.get('finding_ref','—')}** · {audit_label} · "
                 f"{f.get('clause_ref','') or ''} · "
@@ -347,21 +339,20 @@ def show():
             )
 
             with st.expander(expander_title, expanded=False):
-                # Details (read-only)
                 st.markdown(f"**Audit:** {f.get('audit_ref','—')}")
-                st.info(f.get("details","—"))
+                st.info(f.get("details", "—"))
 
                 col_l, col_r = st.columns(2)
                 with col_l:
-                    st.markdown(f"**Root Cause:**")
-                    st.markdown(f.get("root_cause","—") or "—")
-                    st.markdown(f"**Correction:**")
-                    st.markdown(f.get("correction","—") or "—")
+                    st.markdown("**Root Cause:**")
+                    st.markdown(f.get("root_cause", "—") or "—")
+                    st.markdown("**Correction:**")
+                    st.markdown(f.get("correction", "—") or "—")
                 with col_r:
-                    st.markdown(f"**Preventive Action:**")
-                    st.markdown(f.get("preventive_action","—") or "—")
-                    st.markdown(f"**Remarks:**")
-                    st.markdown(f.get("evidence_notes","—") or "—")
+                    st.markdown("**Preventive Action:**")
+                    st.markdown(f.get("preventive_action", "—") or "—")
+                    st.markdown("**Remarks:**")
+                    st.markdown(f.get("evidence_notes", "—") or "—")
 
                 # Evidence files
                 try:
@@ -373,27 +364,25 @@ def show():
                 except:
                     pass
 
-                # Inline update form (only for non-closed or write access)
+                # Inline update form
                 if can_write():
                     st.markdown("---")
                     with st.form(f"update_{f['id']}"):
                         uc1, uc2, uc3 = st.columns(3)
                         with uc1:
                             new_status = st.selectbox(
-                                "Status",
-                                STATUSES,
+                                "Status", STATUSES,
                                 index=STATUSES.index(status_val),
                                 key=f"status_{f['id']}"
                             )
                         with uc2:
-                            owner_opts   = users_options(include_blank=False)
-                            current_key  = next(
+                            owner_opts  = users_options(include_blank=False)
+                            current_key = next(
                                 (k for k, v in owner_opts.items() if v == f.get("action_owner_id")),
                                 list(owner_opts.keys())[0]
                             )
                             new_owner = st.selectbox(
-                                "Action Owner",
-                                list(owner_opts.keys()),
+                                "Action Owner", list(owner_opts.keys()),
                                 index=list(owner_opts.keys()).index(current_key),
                                 key=f"owner_{f['id']}"
                             )
@@ -409,14 +398,14 @@ def show():
                                 key=f"closing_{f['id']}"
                             )
 
-                        new_rc  = st.text_area("Root Cause", value=f.get("root_cause","") or "", height=60, key=f"rc_{f['id']}")
-                        new_cor = st.text_area("Correction", value=f.get("correction","") or "", height=60, key=f"cor_{f['id']}")
-                        new_pa  = st.text_area("Preventive Action", value=f.get("preventive_action","") or "", height=60, key=f"pa_{f['id']}")
-                        new_ev  = st.text_area("Remarks / Notes", value=f.get("evidence_notes","") or "", height=50, key=f"ev_{f['id']}")
+                        new_rc  = st.text_area("Root Cause",         value=f.get("root_cause",        "") or "", height=60, key=f"rc_{f['id']}")
+                        new_cor = st.text_area("Correction",         value=f.get("correction",        "") or "", height=60, key=f"cor_{f['id']}")
+                        new_pa  = st.text_area("Preventive Action",  value=f.get("preventive_action", "") or "", height=60, key=f"pa_{f['id']}")
+                        new_ev  = st.text_area("Remarks / Notes",    value=f.get("evidence_notes",    "") or "", height=50, key=f"ev_{f['id']}")
 
                         new_file = st.file_uploader(
                             "Attach Evidence",
-                            type=["pdf","png","jpg","jpeg","docx","xlsx"],
+                            type=["pdf", "png", "jpg", "jpeg", "docx", "xlsx"],
                             key=f"file_{f['id']}"
                         )
 
@@ -427,10 +416,10 @@ def show():
                             "status":            new_status,
                             "action_owner_id":   owner_opts[new_owner],
                             "target_date":       new_target.isoformat() if new_target else None,
-                            "root_cause":        new_rc or None,
+                            "root_cause":        new_rc  or None,
                             "correction":        new_cor or None,
-                            "preventive_action": new_pa or None,
-                            "evidence_notes":    new_ev or None,
+                            "preventive_action": new_pa  or None,
+                            "evidence_notes":    new_ev  or None,
                         }
                         if new_status == "closed" and closing_date:
                             update["closing_date"] = closing_date.isoformat()
