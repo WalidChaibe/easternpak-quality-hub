@@ -63,9 +63,9 @@ def generate_pdf(findings: list, filters_desc: str) -> bytes:
         f"Generated: {date.today().strftime('%d %b %Y')} | Filters: {filters_desc}", sub_style))
 
     # Usable width = 29.7 - 0.8 - 0.8 = 28.1cm
-    headers    = ["Ref", "Type", "Clause", "Non-Conformity", "Root Cause",
+    headers    = ["Ref", "Type", "Non-Conformity", "Root Cause",
                   "Correction", "Preventive Action", "Owner", "Target", "Status", "Remarks"]
-    col_widths = [1.4*cm, 1.8*cm, 1.5*cm, 5.2*cm, 4.0*cm, 3.8*cm, 3.8*cm, 2.2*cm, 1.8*cm, 1.8*cm, 2.8*cm]
+    col_widths = [1.5*cm, 2.0*cm, 5.8*cm, 4.2*cm, 4.0*cm, 4.0*cm, 2.4*cm, 1.8*cm, 1.8*cm, 2.8*cm]
     # Total: 30.1 — fits within 28.1 with word wrap
 
     data = [[Paragraph(h, head_style) for h in headers]]
@@ -77,7 +77,6 @@ def generate_pdf(findings: list, filters_desc: str) -> bytes:
         row = [
             Paragraph(f.get("finding_ref", "—") or "—", cell_style),
             Paragraph(AUDIT_REVERSE.get(f.get("audit_type", ""), "—"), cell_style),
-            Paragraph(f.get("clause_ref", "—") or "—", cell_style),
             Paragraph(f.get("details", "—") or "—", cell_style),
             Paragraph(f.get("root_cause", "—") or "—", cell_style),
             Paragraph(f.get("correction", "—") or "—", cell_style),
@@ -107,8 +106,8 @@ def generate_pdf(findings: list, filters_desc: str) -> bytes:
     ]
 
     for i, color in enumerate(row_colors):
-        style_cmds.append(("BACKGROUND", (9, i + 1), (9, i + 1), color))
-        style_cmds.append(("TEXTCOLOR",  (9, i + 1), (9, i + 1), colors.white))
+        style_cmds.append(("BACKGROUND", (8, i + 1), (8, i + 1), color))
+        style_cmds.append(("TEXTCOLOR",  (8, i + 1), (8, i + 1), colors.white))
 
     table.setStyle(TableStyle(style_cmds))
     elements.append(table)
@@ -139,7 +138,7 @@ def show():
             status_filter = st.multiselect(
                 "Status",
                 options=STATUSES,
-                default=["open", "in_progress", "overdue"],
+                default=["open", "in_progress", "closed", "overdue"],
                 key="nc_status_filter"
             )
         with c3:
