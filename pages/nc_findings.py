@@ -259,10 +259,7 @@ def show():
                 correction        = st.text_area("Immediate Correction", height=70)
                 preventive_action = st.text_area("Preventive Action Plan", height=70)
 
-                uploaded_file = st.file_uploader(
-                    "Attach Evidence",
-                    type=["pdf", "png", "jpg", "jpeg", "docx", "xlsx"]
-                )
+                uploaded_file = st.file_uploader("Attach Evidence")
 
                 submitted = st.form_submit_button("💾 Save Finding", use_container_width=True)
 
@@ -404,7 +401,6 @@ def show():
 
                         new_file = st.file_uploader(
                             "Attach Evidence",
-                            type=["pdf", "png", "jpg", "jpeg", "docx", "xlsx"],
                             key=f"file_{f['id']}"
                         )
 
