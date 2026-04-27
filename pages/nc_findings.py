@@ -298,7 +298,10 @@ def show():
                             file_bytes   = uploaded_file.read()
                             storage_path = f"evidence/{new_id}/{uploaded_file.name}"
                             try:
-                                sb.storage.from_("evidence").upload(storage_path, file_bytes)
+                                import mimetypes
+                                mime_type, _ = mimetypes.guess_type(uploaded_file.name)
+                                mime_type = mime_type or "application/octet-stream"
+                                sb.storage.from_("evidence").upload(storage_path, file_bytes, {"content-type": mime_type, "upsert": "true"})
                                 file_url = sb.storage.from_("evidence").get_public_url(storage_path)
                                 sb.table("nc_evidence").insert({
                                     "finding_id":  new_id,
@@ -427,7 +430,10 @@ def show():
                                 file_bytes   = new_file.read()
                                 storage_path = f"evidence/{f['id']}/{new_file.name}"
                                 try:
-                                    sb.storage.from_("evidence").upload(storage_path, file_bytes)
+                                    import mimetypes
+                                    mime_type, _ = mimetypes.guess_type(new_file.name)
+                                    mime_type = mime_type or "application/octet-stream"
+                                    sb.storage.from_("evidence").upload(storage_path, file_bytes, {"content-type": mime_type, "upsert": "true"})
                                     file_url = sb.storage.from_("evidence").get_public_url(storage_path)
                                     sb.table("nc_evidence").insert({
                                         "finding_id":  f["id"],
