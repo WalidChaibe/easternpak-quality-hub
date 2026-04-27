@@ -277,7 +277,10 @@ def show():
                                     file_bytes      = ufile.read()
                                     std_code_upload = r.get("standard", "general")
                                     storage_path    = f"{std_code_upload}/{r['clause_number']}/{ufile.name}"
-                                    sb.storage.from_("requirements").upload(storage_path, file_bytes, {"upsert": "true"})
+                                    import mimetypes
+                                    mime_type, _ = mimetypes.guess_type(ufile.name)
+                                    mime_type = mime_type or "application/octet-stream"
+                                    sb.storage.from_("requirements").upload(storage_path, file_bytes, {"content-type": mime_type, "upsert": "true"})
                                     file_url = sb.storage.from_("requirements").get_public_url(storage_path)
                                     sb.table("requirement_documents").insert({
                                         "requirement_id": r["id"],
