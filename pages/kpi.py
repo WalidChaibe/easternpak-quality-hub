@@ -200,14 +200,37 @@ def show():
         if not kpis:
             st.info(f"No KPIs defined for {entry_dept} yet. Add them in Settings.")
         else:
-            # Fetch existing entries for this dept + month
             kpi_ids = [k["id"] for k in kpis]
-            existing_res = sb.table("kpi_entries").select("*")\
-                .in_("kpi_id", kpi_ids)\
-                .eq("month", entry_month.isoformat()).execute()
+
+            # Missing months indicator
+            from collections import defaultdict
+            today_check = date.today()
+            last_month  = (pd.Timestamp(today_check) - pd.DateOffset(months=1)).date().replace(day=1)
+            all_months  = pd.date_range(start="2025-01-01", end=last_month, freq="MS").tolist()
+
+            all_entries_res  = sb.table("kpi_entries").select("kpi_id, month")                .in_("kpi_id", kpi_ids).gte("month", "2025-01-01").execute()
+            entries_by_month = defaultdict(set)
+            for e in (all_entries_res.data or []):
+                entries_by_month[e["month"][:7]].add(e["kpi_id"])
+
+            missing_months = []
+            for m in all_months:
+                month_key    = m.strftime("%Y-%m")
+                missing_kpis = [k["name"] for k in kpis if k["id"] not in entries_by_month.get(month_key, set())]
+                if missing_kpis:
+                    missing_months.append((m.strftime("%B %Y"), missing_kpis))
+
+            if missing_months:
+                with st.expander(f"\u26a0\ufe0f {len(missing_months)} month(s) with missing entries", expanded=True):
+                    for month_lbl, missing_kpi_names in missing_months:
+                        st.markdown(f"**{month_lbl}** \u2014 Missing: {', '.join(missing_kpi_names)}")
+                    st.caption("Select the month from the dropdown above and fill in the missing values.")
+
+            # Fetch existing entries for selected month
+            existing_res = sb.table("kpi_entries").select("*")                .in_("kpi_id", kpi_ids)                .eq("month", entry_month.isoformat()).execute()
             existing_map = {e["kpi_id"]: e for e in (existing_res.data or [])}
 
-            st.markdown(f"#### {entry_dept} — {entry_month_label}")
+            st.markdown(f"#### {entry_dept} \u2014 {entry_month_label}")
             st.caption("Fill actuals for all KPIs below and click Save All at the bottom.")
 
             # Build table header
