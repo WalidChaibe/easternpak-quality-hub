@@ -134,19 +134,24 @@ class SwimlaneFlowchart(Flowable):
     FONT_SZ    = 7
     ARROW_LEN  = 0.5*cm
 
-    def __init__(self, steps, available_width):
+    def __init__(self, steps, available_width, all_lanes=None):
         super().__init__()
         self.steps = steps
         self.avail_w = available_width
 
-        # Group steps by swimlane preserving order of first appearance
-        self.lanes = []
-        seen = {}
-        for s in steps:
-            lane = s.get("swimlane","General")
-            if lane not in seen:
-                seen[lane] = len(self.lanes)
-                self.lanes.append(lane)
+        # Group steps by swimlane preserving order of first appearance.
+        # If all_lanes is provided (used when the flowchart is paginated into
+        # several chunks), use that fixed order so columns line up across pages.
+        if all_lanes:
+            self.lanes = list(all_lanes)
+        else:
+            self.lanes = []
+            seen = {}
+            for s in steps:
+                lane = s.get("swimlane","General")
+                if lane not in seen:
+                    seen[lane] = len(self.lanes)
+                    self.lanes.append(lane)
 
         self.n_lanes  = max(len(self.lanes), 1)
         self.lane_w   = self.avail_w / self.n_lanes
@@ -638,13 +643,35 @@ def generate_pdf(doc):
             story.append(Paragraph(step["text"], numbered))
         story.append(Spacer(1, 0.15*cm))
 
-    # ReportLab swimlane flowchart
+    # ReportLab swimlane flowchart — paginated so it never exceeds one frame's height
     if steps:
         story.append(Spacer(1, 0.4*cm))
         story.append(Paragraph("Process Flowchart", h2s))
         story.append(Spacer(1, 0.2*cm))
-        chart = SwimlaneFlowchart(steps, avail_w)
-        story.append(chart)
+
+        # Fixed lane order across the whole chart, so columns stay aligned
+        # even when the chart is split across multiple pages.
+        all_lanes = []
+        for s in steps:
+            lane = s.get("swimlane", "General")
+            if lane not in all_lanes:
+                all_lanes.append(lane)
+
+        # How many steps fit in one page's frame height before hitting the
+        # "too large" flowable error, with a safety margin.
+        avail_h   = (PAGE_H - TOP_M - BOT_M) - 1*cm
+        step_h    = SwimlaneFlowchart.BOX_H + SwimlaneFlowchart.V_GAP
+        overhead  = SwimlaneFlowchart.LANE_HDR_H + 2 * SwimlaneFlowchart.LANE_PAD
+        max_steps = max(1, int((avail_h - overhead) // step_h))
+
+        for i in range(0, len(steps), max_steps):
+            chunk = steps[i:i + max_steps]
+            chart = SwimlaneFlowchart(chunk, avail_w, all_lanes=all_lanes)
+            story.append(chart)
+            if i + max_steps < len(steps):
+                story.append(PageBreak())
+                story.append(Paragraph("Process Flowchart (continued)", h2s))
+                story.append(Spacer(1, 0.2*cm))
         story.append(Spacer(1, 0.4*cm))
 
     # ── 4.0 ASSOCIATED DOCUMENTATION ────────────────────────
