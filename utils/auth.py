@@ -10,10 +10,10 @@ ROLE_LABELS = {
 }
 
 ROLE_PERMISSIONS = {
-    "admin":           ["dashboard","nc","kpi","requirements","documents","audits","admin"],
-    "quality_manager": ["dashboard","nc","kpi","requirements","documents","audits"],
-    "quality_engineer":["dashboard","nc","kpi","requirements","documents","audits"],
-    "viewer":          ["dashboard","nc","kpi","requirements","documents","audits"],
+    "admin":           ["dashboard","nc","kpi","requirements","documents","audits","proc_builder","admin"],
+    "quality_manager": ["dashboard","nc","kpi","requirements","documents","audits","proc_builder"],
+    "quality_engineer":["dashboard","nc","kpi","requirements","documents","audits","proc_builder"],
+    "viewer":          ["dashboard","nc","kpi","requirements","documents","audits","proc_builder"],
 }
 
 WRITE_ROLES = {"admin","quality_manager","quality_engineer"}
