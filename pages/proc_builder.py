@@ -462,18 +462,19 @@ def show():
                     # Download button
                     col_dl, col_sp = st.columns([2,8])
                     with col_dl:
-                        with st.spinner("Preparing PDF…"):
-                            try:
-                                pdf_bytes = generate_pdf(doc)
-                                st.download_button(
-                                    label="⬇️ Download PDF",
-                                    data=pdf_bytes,
-                                    file_name=f"{doc.get('doc_code','document')}.pdf",
-                                    mime="application/pdf",
-                                    key=f"dl_{doc['id']}",
-                                )
-                            except Exception as e:
-                                st.error(f"PDF error: {e}")
+                        if st.button("⬇️ Generate PDF", key=f"gen_{doc['id']}"):
+                            with st.spinner("Generating PDF…"):
+                                try:
+                                    pdf_bytes = generate_pdf(doc)
+                                    st.download_button(
+                                        label="📥 Click to Download",
+                                        data=pdf_bytes,
+                                        file_name=f"{doc.get('doc_code','document')}.pdf",
+                                        mime="application/pdf",
+                                        key=f"dl2_{doc['id']}",
+                                    )
+                                except Exception as e:
+                                    st.error(f"PDF error: {e}")
 
                     _render_document(sb, doc, uid)
 
