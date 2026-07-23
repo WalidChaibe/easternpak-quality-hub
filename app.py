@@ -13,6 +13,7 @@ st.set_page_config(
 st.markdown("""
 <style>
 [data-testid="stSidebar"] { background: #0f1c2e; }
+[data-testid="stSidebarNav"] { display: none; }
 [data-testid="stSidebar"] * { color: #d4dbe8 !important; }
 [data-testid="stSidebar"] .stButton button {
     background: transparent;
