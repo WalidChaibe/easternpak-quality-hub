@@ -103,6 +103,27 @@ def check_or_add_master(sb, code, title, doc_type, is_internal, uid):
 # ─────────────────────────────────────────────
 # REPORTLAB SWIMLANE FLOWCHART FLOWABLE
 # ─────────────────────────────────────────────
+
+def _draw_filled_poly(canvas, points, fill_color, stroke_color):
+    p = canvas.beginPath()
+    p.moveTo(points[0], points[1])
+    for i in range(2, len(points), 2):
+        p.lineTo(points[i], points[i+1])
+    p.close()
+    canvas.setFillColor(fill_color)
+    canvas.setStrokeColor(stroke_color)
+    canvas.drawPath(p, fill=1, stroke=1)
+
+def _draw_arrowhead(canvas, x, y, color):
+    p = canvas.beginPath()
+    p.moveTo(x, y)
+    p.lineTo(x - 0.12*cm, y + 0.22*cm)
+    p.lineTo(x + 0.12*cm, y + 0.22*cm)
+    p.close()
+    canvas.setFillColor(color)
+    canvas.setStrokeColor(color)
+    canvas.drawPath(p, fill=1, stroke=0)
+
 class SwimlaneFlowchart(Flowable):
     """Draws a vertical swimlane flowchart using ReportLab primitives."""
 
@@ -207,8 +228,8 @@ class SwimlaneFlowchart(Flowable):
                 hw = self.DIA_W / 2
                 hh = self.DIA_H / 2
                 pts = [cx, cy+hh, cx+hw, cy, cx, cy-hh, cx-hw, cy]
-                c.setFillColor(colors.HexColor("#FFF9C4"))
-                c.polygon(pts, fill=1, stroke=1)
+                _draw_filled_poly(c, pts,
+                    colors.HexColor("#FFF9C4"), NAPCO_BLUE)
                 box_top    = cy + hh
                 box_bottom = cy - hh
             elif shape == "rounded":
@@ -264,11 +285,7 @@ class SwimlaneFlowchart(Flowable):
                     y_end   = next_top + 0.05*cm
                     mid_y   = (y_start + y_end) / 2
                     c.line(cx, y_start, cx, y_end)
-                    # Arrowhead
-                    c.polygon([cx, y_end,
-                                cx - 0.12*cm, y_end + 0.22*cm,
-                                cx + 0.12*cm, y_end + 0.22*cm],
-                               fill=1, stroke=0)
+                    _draw_arrowhead(c, cx, y_end, DARK_TEXT)
                     # Connection label
                     if conn:
                         c.setFont(self.FONT, self.FONT_SZ - 1)
@@ -281,10 +298,7 @@ class SwimlaneFlowchart(Flowable):
                     c.line(cx, box_bottom, cx, y_mid)
                     c.line(cx, y_mid, next_cx, y_mid)
                     c.line(next_cx, y_mid, next_cx, next_top + 0.05*cm)
-                    c.polygon([next_cx, next_top + 0.05*cm,
-                                next_cx - 0.12*cm, next_top + 0.27*cm,
-                                next_cx + 0.12*cm, next_top + 0.27*cm],
-                               fill=1, stroke=0)
+                    _draw_arrowhead(c, next_cx, next_top + 0.05*cm, DARK_TEXT)
                     if conn:
                         c.setFont(self.FONT, self.FONT_SZ - 1)
                         c.setFillColor(colors.HexColor("#555555"))
