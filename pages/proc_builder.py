@@ -119,192 +119,138 @@ def _draw_arrowhead(canvas, x, y, color):
     canvas.setStrokeColor(color)
     canvas.drawPath(p, fill=1, stroke=0)
 
-class SwimlaneFlowchart(Flowable):
-    """Draws a vertical swimlane flowchart using ReportLab primitives."""
+def _wrap_words(canvas, text, font, size, max_width):
+    """Greedy word-wrap: returns a list of lines that each fit within max_width."""
+    words = (text or "").split()
+    if not words:
+        return [""]
+    lines, cur = [], []
+    for w in words:
+        test = " ".join(cur + [w])
+        if canvas.stringWidth(test, font, size) <= max_width or not cur:
+            cur.append(w)
+        else:
+            lines.append(" ".join(cur))
+            cur = [w]
+    if cur:
+        lines.append(" ".join(cur))
+    return lines
 
-    BOX_W      = 3.8*cm
-    BOX_H      = 1.1*cm
-    DIA_W      = 3.8*cm
-    DIA_H      = 1.4*cm
-    V_GAP      = 0.7*cm   # vertical gap between steps
-    LANE_PAD   = 0.4*cm
-    LANE_HDR_H = 0.7*cm
-    FONT       = "Helvetica"
-    FONT_B     = "Helvetica-Bold"
-    FONT_SZ    = 7
-    ARROW_LEN  = 0.5*cm
+class SwimlaneFlowchart(Flowable):
+    """Draws a simple top-down process flowchart: a single centered column of
+    steps, each with the responsible role shown as a small label above the
+    box. Matches the original paper procedures, which never used
+    cross-functional swimlane columns."""
+
+    BOX_W        = 8*cm
+    BOX_H        = 1.1*cm
+    DIA_W        = 6*cm
+    DIA_H        = 1.5*cm
+    V_GAP        = 0.9*cm    # vertical gap between steps (room for arrow + label)
+    ROLE_LBL_H   = 0.45*cm   # space reserved above each box for the responsible role
+    LANE_PAD     = 0.4*cm    # top/bottom padding of the whole chart
+    LANE_HDR_H   = 0         # no header row in the single-column layout
+    FONT         = "Helvetica"
+    FONT_B       = "Helvetica-Bold"
+    FONT_SZ      = 7.5
+    ROLE_FONT_SZ = 6.5
 
     def __init__(self, steps, available_width, all_lanes=None):
+        # all_lanes accepted for backward compatibility with callers but is
+        # unused now that the chart is a single column.
         super().__init__()
-        self.steps = steps
+        self.steps   = steps
         self.avail_w = available_width
+        self.width   = available_width
 
-        # Group steps by swimlane preserving order of first appearance.
-        # If all_lanes is provided (used when the flowchart is paginated into
-        # several chunks), use that fixed order so columns line up across pages.
-        if all_lanes:
-            self.lanes = list(all_lanes)
-        else:
-            self.lanes = []
-            seen = {}
-            for s in steps:
-                lane = s.get("swimlane","General")
-                if lane not in seen:
-                    seen[lane] = len(self.lanes)
-                    self.lanes.append(lane)
-
-        self.n_lanes  = max(len(self.lanes), 1)
-        self.lane_w   = self.avail_w / self.n_lanes
-
-        # Calculate total height
-        step_height = self.BOX_H + self.V_GAP
-        self.total_h = (self.LANE_HDR_H + self.LANE_PAD +
-                        len(steps) * step_height + self.LANE_PAD)
-        self.width  = available_width
-        self.height = self.total_h
-
-    def _lane_x(self, lane_name):
-        idx = self.lanes.index(lane_name) if lane_name in self.lanes else 0
-        return idx * self.lane_w
+        step_height   = self.ROLE_LBL_H + self.BOX_H + self.V_GAP
+        self.total_h  = self.LANE_PAD + len(steps) * step_height + self.LANE_PAD
+        self.height   = self.total_h
 
     def _step_y(self, step_idx):
-        """Y from bottom for step center."""
-        content_h = self.total_h - self.LANE_HDR_H - self.LANE_PAD
-        step_area = self.BOX_H + self.V_GAP
-        # top-down: step 0 is near top
+        """Y (from bottom) for the center of the box, not counting its role label."""
+        step_area  = self.ROLE_LBL_H + self.BOX_H + self.V_GAP
         y_from_top = (self.LANE_PAD + step_idx * step_area +
-                      self.BOX_H / 2)
-        return self.total_h - self.LANE_HDR_H - y_from_top
+                      self.ROLE_LBL_H + self.BOX_H / 2)
+        return self.total_h - y_from_top
 
     def draw(self):
-        c = self.canv
+        c  = self.canv
+        cx = self.width / 2
 
-        # ── Lane backgrounds and headers ──
-        for i, lane in enumerate(self.lanes):
-            x = i * self.lane_w
-            # Alternating background
-            bg = colors.HexColor("#EBF3FA") if i % 2 == 0 else colors.white
-            c.setFillColor(bg)
-            c.rect(x, 0, self.lane_w,
-                   self.total_h - self.LANE_HDR_H, fill=1, stroke=0)
-
-            # Lane header
-            c.setFillColor(NAPCO_BLUE)
-            c.rect(x, self.total_h - self.LANE_HDR_H,
-                   self.lane_w, self.LANE_HDR_H, fill=1, stroke=0)
-            c.setFillColor(colors.white)
-            c.setFont(self.FONT_B, self.FONT_SZ + 1)
-            c.drawCentredString(x + self.lane_w/2,
-                                self.total_h - self.LANE_HDR_H + 0.18*cm,
-                                lane)
-
-        # Border around whole chart
-        c.setStrokeColor(colors.HexColor("#AAAAAA"))
+        # Border around the whole chart
+        c.setStrokeColor(colors.HexColor("#CCCCCC"))
         c.setLineWidth(0.5)
         c.rect(0, 0, self.width, self.total_h, fill=0, stroke=1)
 
-        # Lane dividers
-        for i in range(1, self.n_lanes):
-            x = i * self.lane_w
-            c.line(x, 0, x, self.total_h)
-
-        # ── Draw steps and arrows ──
         for idx, step in enumerate(self.steps):
-            lane  = step.get("swimlane","General")
-            shape = step.get("shape","rect")
-            title = step.get("title","")
-            conn  = step.get("connection_label","")
+            shape = step.get("shape", "rect")
+            title = step.get("title", "")
+            role  = step.get("swimlane", "")
+            conn  = step.get("connection_label", "")
 
-            lx    = self._lane_x(lane)
-            cy    = self._step_y(idx)
-            cx    = lx + self.lane_w / 2
+            cy = self._step_y(idx)
 
             # Box
-            c.setFillColor(colors.white)
-            c.setStrokeColor(NAPCO_BLUE)
             c.setLineWidth(1)
+            c.setStrokeColor(NAPCO_BLUE)
 
             if shape == "diamond":
-                hw = self.DIA_W / 2
-                hh = self.DIA_H / 2
+                hw, hh = self.DIA_W / 2, self.DIA_H / 2
                 pts = [cx, cy+hh, cx+hw, cy, cx, cy-hh, cx-hw, cy]
-                _draw_filled_poly(c, pts,
-                    colors.HexColor("#FFF9C4"), NAPCO_BLUE)
-                box_top    = cy + hh
-                box_bottom = cy - hh
+                _draw_filled_poly(c, pts, colors.HexColor("#FFF9C4"), NAPCO_BLUE)
+                box_top, box_bottom = cy + hh, cy - hh
+                text_max_w = self.DIA_W - 20
             elif shape == "rounded":
-                bw = self.BOX_W
-                bh = self.BOX_H
+                bw, bh = self.BOX_W, self.BOX_H
                 c.setFillColor(colors.HexColor("#E8F5E9"))
-                c.roundRect(cx - bw/2, cy - bh/2, bw, bh, radius=bh/2,
-                             fill=1, stroke=1)
-                box_top    = cy + bh/2
-                box_bottom = cy - bh/2
+                c.roundRect(cx - bw/2, cy - bh/2, bw, bh, radius=bh/2, fill=1, stroke=1)
+                box_top, box_bottom = cy + bh/2, cy - bh/2
+                text_max_w = bw - 12
             else:
-                bw = self.BOX_W
-                bh = self.BOX_H
+                bw, bh = self.BOX_W, self.BOX_H
                 c.setFillColor(colors.white)
                 c.rect(cx - bw/2, cy - bh/2, bw, bh, fill=1, stroke=1)
-                box_top    = cy + bh/2
-                box_bottom = cy - bh/2
+                box_top, box_bottom = cy + bh/2, cy - bh/2
+                text_max_w = bw - 12
 
-            # Step text — wrap manually
+            # Role label above the box
+            if role:
+                c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
+                c.setFillColor(NAPCO_BLUE)
+                c.drawCentredString(cx, box_top + 0.14*cm, role.upper())
+
+            # Title text — wrap to fit the box, vertically centered
             c.setFillColor(DARK_TEXT)
             c.setFont(self.FONT, self.FONT_SZ)
-            words      = title.split()
-            line1, line2 = [], []
-            for w in words:
-                test = " ".join(line1 + [w])
-                if c.stringWidth(test, self.FONT, self.FONT_SZ) < self.BOX_W - 4:
-                    line1.append(w)
-                else:
-                    line2.append(w)
-            if line2:
-                c.drawCentredString(cx, cy + 0.1*cm, " ".join(line1))
-                c.drawCentredString(cx, cy - 0.22*cm, " ".join(line2))
-            else:
-                c.drawCentredString(cx, cy - 0.08*cm, " ".join(line1))
+            lines  = _wrap_words(c, title, self.FONT, self.FONT_SZ, text_max_w)
+            line_h = self.FONT_SZ + 1.5
+            start_y = cy + (len(lines) - 1) * line_h / 2
+            for li, ln in enumerate(lines):
+                c.drawCentredString(cx, start_y - li * line_h, ln)
 
             # Arrow to next step
             if idx < len(self.steps) - 1:
-                next_step  = self.steps[idx+1]
-                next_lane  = next_step.get("swimlane","General")
-                next_lx    = self._lane_x(next_lane)
-                next_cy    = self._step_y(idx+1)
-                next_cx    = next_lx + self.lane_w / 2
-                next_shape = next_step.get("shape","rect")
-                next_top   = next_cy + (self.DIA_H/2 if next_shape=="diamond" else self.BOX_H/2)
+                next_step  = self.steps[idx + 1]
+                next_cy    = self._step_y(idx + 1)
+                next_shape = next_step.get("shape", "rect")
+                next_top   = next_cy + (self.DIA_H/2 if next_shape == "diamond" else self.BOX_H/2)
 
                 c.setStrokeColor(DARK_TEXT)
                 c.setFillColor(DARK_TEXT)
                 c.setLineWidth(0.8)
 
-                if lane == next_lane:
-                    # Straight down arrow
-                    y_start = box_bottom
-                    y_end   = next_top + 0.05*cm
-                    mid_y   = (y_start + y_end) / 2
-                    c.line(cx, y_start, cx, y_end)
-                    _draw_arrowhead(c, cx, y_end, DARK_TEXT)
-                    # Connection label
-                    if conn:
-                        c.setFont(self.FONT, self.FONT_SZ - 1)
-                        c.setFillColor(colors.HexColor("#555555"))
-                        c.drawCentredString(cx + 0.3*cm, mid_y, conn)
-                        c.setFillColor(DARK_TEXT)
-                else:
-                    # Cross-lane: go down then across then down
-                    y_mid = box_bottom - self.V_GAP * 0.4
-                    c.line(cx, box_bottom, cx, y_mid)
-                    c.line(cx, y_mid, next_cx, y_mid)
-                    c.line(next_cx, y_mid, next_cx, next_top + 0.05*cm)
-                    _draw_arrowhead(c, next_cx, next_top + 0.05*cm, DARK_TEXT)
-                    if conn:
-                        c.setFont(self.FONT, self.FONT_SZ - 1)
-                        c.setFillColor(colors.HexColor("#555555"))
-                        mid_x = (cx + next_cx) / 2
-                        c.drawCentredString(mid_x, y_mid + 0.08*cm, conn)
-                        c.setFillColor(DARK_TEXT)
+                y_end = next_top + 0.05*cm
+                c.line(cx, box_bottom, cx, y_end)
+                _draw_arrowhead(c, cx, y_end, DARK_TEXT)
+
+                if conn:
+                    mid_y = (box_bottom + y_end) / 2
+                    c.setFont(self.FONT, self.FONT_SZ - 1)
+                    c.setFillColor(colors.HexColor("#555555"))
+                    c.drawString(cx + 0.3*cm, mid_y - 2, conn)
+                    c.setFillColor(DARK_TEXT)
+
 
 
 # ─────────────────────────────────────────────
@@ -352,7 +298,9 @@ def generate_pdf(doc):
         w, h = A4
         hdr_x   = LEFT_M
         hdr_w   = w - LEFT_M - RIGHT_M
-        hdr_top = h - 0.8*cm
+        # Header table moved down from the very top of the page so the logo
+        # (drawn above it) has room and doesn't get clipped by the page edge.
+        hdr_top = h - 1.7*cm
         row1_h  = 0.65*cm
         row2_h  = 0.55*cm
         hdr_h   = row1_h + row2_h
@@ -360,8 +308,8 @@ def generate_pdf(doc):
         # Logo — sits above header table, top-left
         try:
             canvas.drawImage(LOGO_PATH,
-                             hdr_x, hdr_top + 0.1*cm,
-                             width=2.8*cm, height=1.1*cm,
+                             hdr_x, hdr_top + 0.15*cm,
+                             width=2.6*cm, height=1.0*cm,
                              preserveAspectRatio=True, mask='auto')
         except Exception:
             pass
@@ -431,18 +379,30 @@ def generate_pdf(doc):
             canvas.drawCentredString(x_cur + cw/2, y2, lbl)
             x_cur += cw
 
-        # Footer
+        # Footer — disclaimer text is word-wrapped so it always stays inside the box
+        disclaimer = ("THE INFORMATION CONTAINED HEREIN IS PROPRIETARY TO NAPCO NATIONAL AND IT SHALL "
+                      "NOT BE USED, REPRODUCED OR DISCLOSED TO OTHERS EXCEPT AS SPECIFICALLY PERMITTED "
+                      "IN WRITING BY THE PROPRIETOR.")
+        disc_font, disc_sz = "Helvetica-Oblique", 6.5
+        disc_max_w  = hdr_w - 0.6*cm
+        disc_lines  = _wrap_words(canvas, disclaimer, disc_font, disc_sz, disc_max_w)
+        line_gap    = 0.30*cm
+        footer_h    = 0.25*cm + (len(disc_lines) + 1) * line_gap  # +1 for the UNCONTROLLED line
+
         fy = 0.5*cm
         canvas.setFillColor(GRAY_BG)
-        canvas.rect(LEFT_M, fy, hdr_w, 0.85*cm, fill=1, stroke=1)
-        canvas.setFont("Helvetica-Oblique", 6.5)
+        canvas.rect(LEFT_M, fy, hdr_w, footer_h, fill=1, stroke=1)
+
+        ty = fy + footer_h - 0.28*cm
+        canvas.setFont(disc_font, disc_sz)
         canvas.setFillColor(colors.HexColor("#555555"))
-        canvas.drawCentredString(
-            w/2, fy + 0.48*cm,
-            "THE INFORMATION CONTAINED HEREIN IS PROPRIETARY TO NAPCO NATIONAL AND IT SHALL NOT BE "
-            "USED, REPRODUCED OR DISCLOSED TO OTHERS EXCEPT AS SPECIFICALLY PERMITTED IN WRITING BY THE PROPRIETOR.")
+        for ln in disc_lines:
+            canvas.drawCentredString(w/2, ty, ln)
+            ty -= line_gap
+
         canvas.setFont("Helvetica-BoldOblique", 7)
-        canvas.drawCentredString(w/2, fy + 0.18*cm, '"UNCONTROLLED IF PRINTED"')
+        canvas.setFillColor(colors.black)
+        canvas.drawCentredString(w/2, ty, '"UNCONTROLLED IF PRINTED"')
         canvas.restoreState()
 
     # ── Build document ──────────────────────────────────────
@@ -470,34 +430,6 @@ def generate_pdf(doc):
     story.append(Paragraph(title_txt.upper(), title_s))
     story.append(Spacer(1, 0.5*cm))
 
-    # Approvals table
-    if approvals:
-        n = len(approvals)
-        cw = avail_w / (n + 1)
-        ap_data = [
-            [Paragraph("APPROVED BY", bold_s)] + [""] * n,
-            [Paragraph("Department", bold_s)] +
-            [Paragraph(a.get("department",""), centered) for a in approvals],
-            [Paragraph("Function", bold_s)] +
-            [Paragraph(a.get("function",""), centered) for a in approvals],
-            [Paragraph("Signature", bold_s)] + [""] * n,
-            [Paragraph("Date", bold_s)] + [""] * n,
-        ]
-        ap_t = Table(ap_data, colWidths=[cw]*(n+1),
-                     rowHeights=[0.6*cm, 0.7*cm, 0.7*cm, 1.4*cm, 0.7*cm])
-        ap_t.setStyle(TableStyle([
-            ("GRID",        (0,0), (-1,-1), 0.5, colors.HexColor("#999999")),
-            ("BACKGROUND",  (0,0), (-1,0),  NAPCO_BLUE),
-            ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
-            ("BACKGROUND",  (0,1), (0,-1),  LIGHT_BLUE),
-            ("FONTNAME",    (0,0), (0,-1),  "Helvetica-Bold"),
-            ("FONTSIZE",    (0,0), (-1,-1), 8),
-            ("VALIGN",      (0,0), (-1,-1), "MIDDLE"),
-            ("ALIGN",       (1,0), (-1,-1), "CENTER"),
-            ("SPAN",        (0,0), (-1,0)),
-        ]))
-        story.append(ap_t)
-        story.append(Spacer(1, 0.4*cm))
 
     # Date of adoption
     adopt_t = Table(
@@ -643,30 +575,23 @@ def generate_pdf(doc):
             story.append(Paragraph(step["text"], numbered))
         story.append(Spacer(1, 0.15*cm))
 
-    # ReportLab swimlane flowchart — paginated so it never exceeds one frame's height
+    # Single-column process flowchart — paginated so it never exceeds one frame's height
     if steps:
         story.append(Spacer(1, 0.4*cm))
         story.append(Paragraph("Process Flowchart", h2s))
         story.append(Spacer(1, 0.2*cm))
 
-        # Fixed lane order across the whole chart, so columns stay aligned
-        # even when the chart is split across multiple pages.
-        all_lanes = []
-        for s in steps:
-            lane = s.get("swimlane", "General")
-            if lane not in all_lanes:
-                all_lanes.append(lane)
-
         # How many steps fit in one page's frame height before hitting the
         # "too large" flowable error, with a safety margin.
         avail_h   = (PAGE_H - TOP_M - BOT_M) - 1*cm
-        step_h    = SwimlaneFlowchart.BOX_H + SwimlaneFlowchart.V_GAP
-        overhead  = SwimlaneFlowchart.LANE_HDR_H + 2 * SwimlaneFlowchart.LANE_PAD
+        step_h    = (SwimlaneFlowchart.ROLE_LBL_H + SwimlaneFlowchart.BOX_H
+                     + SwimlaneFlowchart.V_GAP)
+        overhead  = 2 * SwimlaneFlowchart.LANE_PAD
         max_steps = max(1, int((avail_h - overhead) // step_h))
 
         for i in range(0, len(steps), max_steps):
             chunk = steps[i:i + max_steps]
-            chart = SwimlaneFlowchart(chunk, avail_w, all_lanes=all_lanes)
+            chart = SwimlaneFlowchart(chunk, avail_w)
             story.append(chart)
             if i + max_steps < len(steps):
                 story.append(PageBreak())
@@ -1095,23 +1020,10 @@ def _render_document(sb, doc, uid):
     st.markdown(f"<h3 style='text-align:center'>{dept_label.upper()}</h3>", unsafe_allow_html=True)
     st.markdown(f"<h2 style='text-align:center'>{title.upper()}</h2>", unsafe_allow_html=True)
 
-    approvals = doc.get("approvals") or []
-    if approvals:
-        cols = st.columns(len(approvals)+1)
-        labels = ["Department","Function","Signature","Date"]
-        with cols[0]:
-            for l in labels:
-                st.markdown(f"**{l}**")
-        for i, ap in enumerate(approvals):
-            with cols[i+1]:
-                st.markdown(ap.get("department",""))
-                st.markdown(f"*{ap.get('function','')}*")
-                st.markdown("&nbsp;")
-                st.markdown("&nbsp;")
-
     adoption = doc.get("date_of_adoption","—")
     st.markdown(f"<p style='text-align:center'><b>Date of Adoption:</b> {adoption}</p>",
                 unsafe_allow_html=True)
+
 
     st.markdown("#### REVISION HISTORY")
     if revisions:
