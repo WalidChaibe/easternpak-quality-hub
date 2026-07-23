@@ -14,11 +14,6 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
-from reportlab.graphics.shapes import (
-    Drawing, Rect, String, Line, Polygon, Group, Circle
-)
-from reportlab.graphics import renderPDF
-from reportlab.graphics.shapes import Arrow
 from reportlab.platypus.flowables import Flowable
 
 from utils.auth import require_auth, can_write, get_profile
