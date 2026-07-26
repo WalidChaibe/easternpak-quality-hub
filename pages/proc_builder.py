@@ -5,6 +5,7 @@ import base64
 import requests
 import io
 import math
+import re
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import cm, mm
@@ -15,6 +16,7 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 from reportlab.platypus.flowables import Flowable
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 from utils.auth import require_auth, can_write, get_profile
 from utils.supabase_client import get_supabase
@@ -99,6 +101,16 @@ def check_or_add_master(sb, code, title, doc_type, is_internal, uid):
 # REPORTLAB SWIMLANE FLOWCHART FLOWABLE
 # ─────────────────────────────────────────────
 
+def _clean_approval_label(text):
+    """Some legacy documents embed '(Prepared by)' / '(Reviewed by)' /
+    '(Approved by)' directly inside the function name. The approvals table
+    already has a 'Prepared by / Reviewed by / Approved by' style role for
+    each column via its position, so this suffix is redundant — strip it."""
+    if not text:
+        return text
+    return re.sub(r"\s*\((?:prepared|reviewed|approved)\s+by\)\s*", "",
+                   text, flags=re.IGNORECASE).strip()
+
 def _draw_filled_poly(canvas, points, fill_color, stroke_color):
     p = canvas.beginPath()
     p.moveTo(points[0], points[1])
@@ -119,7 +131,7 @@ def _draw_arrowhead(canvas, x, y, color):
     canvas.setStrokeColor(color)
     canvas.drawPath(p, fill=1, stroke=0)
 
-def _wrap_words(canvas, text, font, size, max_width):
+def _wrap_words(text, font, size, max_width):
     """Greedy word-wrap: returns a list of lines that each fit within max_width."""
     words = (text or "").split()
     if not words:
@@ -127,7 +139,7 @@ def _wrap_words(canvas, text, font, size, max_width):
     lines, cur = [], []
     for w in words:
         test = " ".join(cur + [w])
-        if canvas.stringWidth(test, font, size) <= max_width or not cur:
+        if stringWidth(test, font, size) <= max_width or not cur:
             cur.append(w)
         else:
             lines.append(" ".join(cur))
@@ -137,23 +149,32 @@ def _wrap_words(canvas, text, font, size, max_width):
     return lines
 
 class SwimlaneFlowchart(Flowable):
-    """Draws a simple top-down process flowchart: a single centered column of
-    steps, each with the responsible role shown as a small label above the
-    box. Matches the original paper procedures, which never used
-    cross-functional swimlane columns."""
+    """Draws a clean, single-column top-down process flowchart. Each step is
+    a rounded box with a soft drop shadow and a small role "chip" above it;
+    decision points are diamonds. Box heights are computed from the actual
+    wrapped text up front (not fixed), so long titles never overflow their
+    box, and spacing stays even throughout."""
 
-    BOX_W        = 8*cm
-    BOX_H        = 1.1*cm
-    DIA_W        = 6*cm
-    DIA_H        = 1.5*cm
-    V_GAP        = 0.9*cm    # vertical gap between steps (room for arrow + label)
-    ROLE_LBL_H   = 0.45*cm   # space reserved above each box for the responsible role
-    LANE_PAD     = 0.4*cm    # top/bottom padding of the whole chart
-    LANE_HDR_H   = 0         # no header row in the single-column layout
+    BOX_W        = 8.6*cm
+    MIN_BOX_H    = 1.0*cm
+    DIA_W        = 6.6*cm
+    MIN_DIA_H    = 1.7*cm
+    V_GAP        = 1.05*cm     # vertical gap between steps (room for arrow + label)
+    ROLE_LBL_H   = 0.55*cm     # space reserved above each box for the role chip
+    LANE_PAD     = 0.5*cm      # top/bottom padding of the whole chart
+    LANE_HDR_H   = 0           # no header row in the single-column layout
     FONT         = "Helvetica"
     FONT_B       = "Helvetica-Bold"
-    FONT_SZ      = 7.5
-    ROLE_FONT_SZ = 6.5
+    FONT_SZ      = 8
+    ROLE_FONT_SZ = 6.3
+    LINE_H       = FONT_SZ + 2.4
+
+    BOX_FILL     = colors.HexColor("#EAF3FB")
+    BOX_BORDER   = NAPCO_BLUE
+    DIA_FILL     = colors.HexColor("#FFF6D8")
+    DIA_BORDER   = colors.HexColor("#C9A227")
+    SHADOW_COLOR = colors.HexColor("#DADADA")
+    ARROW_COLOR  = colors.HexColor("#4A4A4A")
 
     def __init__(self, steps, available_width, all_lanes=None):
         # all_lanes accepted for backward compatibility with callers but is
@@ -163,93 +184,132 @@ class SwimlaneFlowchart(Flowable):
         self.avail_w = available_width
         self.width   = available_width
 
-        step_height   = self.ROLE_LBL_H + self.BOX_H + self.V_GAP
-        self.total_h  = self.LANE_PAD + len(steps) * step_height + self.LANE_PAD
-        self.height   = self.total_h
+        # Pre-compute wrapped title lines + required box height for every
+        # step. This is done up front (not during draw) so total height and
+        # per-step spacing are exact, and no title can overflow its box.
+        self._prepared = []
+        for step in steps:
+            shape = step.get("shape", "rect")
+            title = step.get("title", "")
+            if shape == "diamond":
+                max_w = self.DIA_W - 1.3*cm
+            else:
+                max_w = self.BOX_W - 0.7*cm
+            lines  = _wrap_words(title, self.FONT, self.FONT_SZ, max_w)
+            text_h = len(lines) * self.LINE_H
+            if shape == "diamond":
+                box_h = max(self.MIN_DIA_H, text_h + 0.7*cm)
+            else:
+                box_h = max(self.MIN_BOX_H, text_h + 0.35*cm)
+            self._prepared.append({"shape": shape, "lines": lines, "box_h": box_h})
 
-    def _step_y(self, step_idx):
-        """Y (from bottom) for the center of the box, not counting its role label."""
-        step_area  = self.ROLE_LBL_H + self.BOX_H + self.V_GAP
-        y_from_top = (self.LANE_PAD + step_idx * step_area +
-                      self.ROLE_LBL_H + self.BOX_H / 2)
-        return self.total_h - y_from_top
+        self._step_heights = [self.ROLE_LBL_H + p["box_h"] + self.V_GAP
+                               for p in self._prepared]
+        self.total_h = self.LANE_PAD + sum(self._step_heights) + self.LANE_PAD
+        self.height  = self.total_h
+
+    def _step_geom(self, idx):
+        """Returns (center_y, box_h) for step idx, from the bottom of the flowable."""
+        y_from_top = self.LANE_PAD + sum(self._step_heights[:idx])
+        box_h = self._prepared[idx]["box_h"]
+        y_from_top += self.ROLE_LBL_H + box_h / 2
+        return self.total_h - y_from_top, box_h
 
     def draw(self):
         c  = self.canv
         cx = self.width / 2
+        c.setLineCap(1)   # round line caps
+        c.setLineJoin(1)  # round line joins — softer arrow/line corners
 
-        # Border around the whole chart
-        c.setStrokeColor(colors.HexColor("#CCCCCC"))
-        c.setLineWidth(0.5)
-        c.rect(0, 0, self.width, self.total_h, fill=0, stroke=1)
+        # Subtle outer border around the whole chart area
+        c.setStrokeColor(colors.HexColor("#DDDDDD"))
+        c.setLineWidth(0.6)
+        c.roundRect(1, 1, self.width - 2, self.total_h - 2, radius=6, fill=0, stroke=1)
 
         for idx, step in enumerate(self.steps):
-            shape = step.get("shape", "rect")
-            title = step.get("title", "")
+            p     = self._prepared[idx]
+            shape = p["shape"]
+            lines = p["lines"]
             role  = step.get("swimlane", "")
             conn  = step.get("connection_label", "")
-
-            cy = self._step_y(idx)
-
-            # Box
-            c.setLineWidth(1)
-            c.setStrokeColor(NAPCO_BLUE)
+            cy, bh = self._step_geom(idx)
 
             if shape == "diamond":
-                hw, hh = self.DIA_W / 2, self.DIA_H / 2
+                hw, hh = self.DIA_W / 2, bh / 2
+                # Soft shadow (offset duplicate, no border)
+                off = 0.08*cm
+                shadow_pts = [cx+off, cy+hh-off, cx+hw+off, cy-off,
+                              cx+off, cy-hh-off, cx-hw+off, cy-off]
+                c.setFillColor(self.SHADOW_COLOR)
+                c.setStrokeColor(self.SHADOW_COLOR)
+                _draw_filled_poly(c, shadow_pts, self.SHADOW_COLOR, self.SHADOW_COLOR)
+                # Main diamond
                 pts = [cx, cy+hh, cx+hw, cy, cx, cy-hh, cx-hw, cy]
-                _draw_filled_poly(c, pts, colors.HexColor("#FFF9C4"), NAPCO_BLUE)
+                c.setLineWidth(1.2)
+                _draw_filled_poly(c, pts, self.DIA_FILL, self.DIA_BORDER)
                 box_top, box_bottom = cy + hh, cy - hh
-                text_max_w = self.DIA_W - 20
-            elif shape == "rounded":
-                bw, bh = self.BOX_W, self.BOX_H
-                c.setFillColor(colors.HexColor("#E8F5E9"))
-                c.roundRect(cx - bw/2, cy - bh/2, bw, bh, radius=bh/2, fill=1, stroke=1)
-                box_top, box_bottom = cy + bh/2, cy - bh/2
-                text_max_w = bw - 12
             else:
-                bw, bh = self.BOX_W, self.BOX_H
-                c.setFillColor(colors.white)
-                c.rect(cx - bw/2, cy - bh/2, bw, bh, fill=1, stroke=1)
+                bw = self.BOX_W
+                radius = 8
+                # Soft shadow
+                c.setFillColor(self.SHADOW_COLOR)
+                c.roundRect(cx - bw/2 + 0.08*cm, cy - bh/2 - 0.08*cm, bw, bh,
+                            radius=radius, fill=1, stroke=0)
+                # Main box
+                c.setFillColor(self.BOX_FILL)
+                c.setStrokeColor(self.BOX_BORDER)
+                c.setLineWidth(1.2)
+                c.roundRect(cx - bw/2, cy - bh/2, bw, bh, radius=radius, fill=1, stroke=1)
                 box_top, box_bottom = cy + bh/2, cy - bh/2
-                text_max_w = bw - 12
 
-            # Role label above the box
+            # Role "chip" above the box
             if role:
+                role_txt = role.upper()
                 c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
+                chip_w = stringWidth(role_txt, self.FONT_B, self.ROLE_FONT_SZ) + 0.34*cm
+                chip_h = 0.36*cm
+                chip_y = box_top + 0.09*cm
                 c.setFillColor(NAPCO_BLUE)
-                c.drawCentredString(cx, box_top + 0.14*cm, role.upper())
+                c.roundRect(cx - chip_w/2, chip_y, chip_w, chip_h,
+                            radius=chip_h/2, fill=1, stroke=0)
+                c.setFillColor(colors.white)
+                c.drawCentredString(cx, chip_y + 0.10*cm, role_txt)
 
-            # Title text — wrap to fit the box, vertically centered
+            # Title text — vertically centered, already wrapped to fit
             c.setFillColor(DARK_TEXT)
             c.setFont(self.FONT, self.FONT_SZ)
-            lines  = _wrap_words(c, title, self.FONT, self.FONT_SZ, text_max_w)
-            line_h = self.FONT_SZ + 1.5
-            start_y = cy + (len(lines) - 1) * line_h / 2
+            start_y = cy + (len(lines) - 1) * self.LINE_H / 2
             for li, ln in enumerate(lines):
-                c.drawCentredString(cx, start_y - li * line_h, ln)
+                c.drawCentredString(cx, start_y - li * self.LINE_H, ln)
 
             # Arrow to next step
             if idx < len(self.steps) - 1:
-                next_step  = self.steps[idx + 1]
-                next_cy    = self._step_y(idx + 1)
-                next_shape = next_step.get("shape", "rect")
-                next_top   = next_cy + (self.DIA_H/2 if next_shape == "diamond" else self.BOX_H/2)
+                next_cy, next_bh = self._step_geom(idx + 1)
+                next_shape = self._prepared[idx + 1]["shape"]
+                next_top = next_cy + next_bh / 2
 
-                c.setStrokeColor(DARK_TEXT)
-                c.setFillColor(DARK_TEXT)
-                c.setLineWidth(0.8)
-
-                y_end = next_top + 0.05*cm
+                c.setStrokeColor(self.ARROW_COLOR)
+                c.setFillColor(self.ARROW_COLOR)
+                c.setLineWidth(1.1)
+                y_end = next_top + 0.06*cm
                 c.line(cx, box_bottom, cx, y_end)
-                _draw_arrowhead(c, cx, y_end, DARK_TEXT)
+                _draw_arrowhead(c, cx, y_end, self.ARROW_COLOR)
 
+                # Connection label drawn as a small pill badge on the arrow
                 if conn:
                     mid_y = (box_bottom + y_end) / 2
-                    c.setFont(self.FONT, self.FONT_SZ - 1)
-                    c.setFillColor(colors.HexColor("#555555"))
-                    c.drawString(cx + 0.3*cm, mid_y - 2, conn)
-                    c.setFillColor(DARK_TEXT)
+                    c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
+                    label_w = stringWidth(conn, self.FONT_B, self.ROLE_FONT_SZ) + 0.3*cm
+                    label_h = 0.34*cm
+                    lx = cx + 0.16*cm
+                    c.setFillColor(colors.white)
+                    c.setStrokeColor(self.ARROW_COLOR)
+                    c.setLineWidth(0.6)
+                    c.roundRect(lx, mid_y - label_h/2, label_w, label_h,
+                                radius=label_h/2, fill=1, stroke=1)
+                    c.setFillColor(self.ARROW_COLOR)
+                    c.drawCentredString(lx + label_w/2, mid_y - 0.09*cm, conn)
+
 
 
 
@@ -279,9 +339,6 @@ def generate_pdf(doc):
                                leftIndent=24, spaceAfter=3)
     small_i  = ParagraphStyle("SI", fontName="Helvetica-Oblique", fontSize=7, leading=9,
                                alignment=TA_CENTER, textColor=colors.grey)
-    toc_main = ParagraphStyle("TM", fontName="Helvetica-Bold", fontSize=10, leading=14)
-    toc_sub  = ParagraphStyle("TS", fontName="Helvetica",      fontSize=9,  leading=13,
-                               leftIndent=16)
 
     doc_code   = doc.get("doc_code","—")
     title_txt  = doc.get("title","")
@@ -385,7 +442,7 @@ def generate_pdf(doc):
                       "IN WRITING BY THE PROPRIETOR.")
         disc_font, disc_sz = "Helvetica-Oblique", 6.5
         disc_max_w  = hdr_w - 0.6*cm
-        disc_lines  = _wrap_words(canvas, disclaimer, disc_font, disc_sz, disc_max_w)
+        disc_lines  = _wrap_words(disclaimer, disc_font, disc_sz, disc_max_w)
         line_gap    = 0.30*cm
         footer_h    = 0.25*cm + (len(disc_lines) + 1) * line_gap  # +1 for the UNCONTROLLED line
 
@@ -430,6 +487,34 @@ def generate_pdf(doc):
     story.append(Paragraph(title_txt.upper(), title_s))
     story.append(Spacer(1, 0.5*cm))
 
+    # Approvals table
+    if approvals:
+        n = len(approvals)
+        cw = avail_w / (n + 1)
+        ap_data = [
+            [Paragraph("APPROVED BY", bold_s)] + [""] * n,
+            [Paragraph("Department", bold_s)] +
+            [Paragraph(a.get("department",""), centered) for a in approvals],
+            [Paragraph("Function", bold_s)] +
+            [Paragraph(_clean_approval_label(a.get("function","")), centered) for a in approvals],
+            [Paragraph("Signature", bold_s)] + [""] * n,
+            [Paragraph("Date", bold_s)] + [""] * n,
+        ]
+        ap_t = Table(ap_data, colWidths=[cw]*(n+1),
+                     rowHeights=[0.6*cm, 0.7*cm, 0.7*cm, 1.4*cm, 0.7*cm])
+        ap_t.setStyle(TableStyle([
+            ("GRID",        (0,0), (-1,-1), 0.5, colors.HexColor("#999999")),
+            ("BACKGROUND",  (0,0), (-1,0),  NAPCO_BLUE),
+            ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+            ("BACKGROUND",  (0,1), (0,-1),  LIGHT_BLUE),
+            ("FONTNAME",    (0,0), (0,-1),  "Helvetica-Bold"),
+            ("FONTSIZE",    (0,0), (-1,-1), 8),
+            ("VALIGN",      (0,0), (-1,-1), "MIDDLE"),
+            ("ALIGN",       (1,0), (-1,-1), "CENTER"),
+            ("SPAN",        (0,0), (-1,0)),
+        ]))
+        story.append(ap_t)
+        story.append(Spacer(1, 0.4*cm))
 
     # Date of adoption
     adopt_t = Table(
@@ -491,20 +576,35 @@ def generate_pdf(doc):
         ("4.2", "Resulting Records", True),
         ("4.3", "Internal / External References", True),
     ]
+
+    toc_num_main = ParagraphStyle("TNM", fontName="Helvetica-Bold", fontSize=10, leading=14)
+    toc_num_sub  = ParagraphStyle("TNS", fontName="Helvetica",      fontSize=9,  leading=13, leftIndent=10)
+    toc_lbl_main = ParagraphStyle("TLM", fontName="Helvetica-Bold", fontSize=10, leading=14)
+    toc_lbl_sub  = ParagraphStyle("TLS", fontName="Helvetica",      fontSize=9,  leading=13)
+    toc_dots_sty = ParagraphStyle("TD",  fontName="Helvetica",      fontSize=9,  leading=13,
+                                   textColor=colors.HexColor("#BBBBBB"))
+
+    toc_rows = []
     for num, lbl, is_sub in toc_entries:
-        sty = toc_sub if is_sub else toc_main
-        dots = "." * 80
-        row = Table(
-            [[Paragraph(f"{num}", sty),
-              Paragraph(lbl, sty),
-              Paragraph(dots, ParagraphStyle("dots", fontName="Helvetica",
-                                              fontSize=8, textColor=colors.HexColor("#BBBBBB"))),
-              Paragraph("", sty)]],
-            colWidths=[1.2*cm, 8*cm, None, 1*cm]
-        )
-        row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"BOTTOM"),
-                                  ("BOTTOMPADDING",(0,0),(-1,-1),1)]))
-        story.append(row)
+        num_sty = toc_num_sub if is_sub else toc_num_main
+        lbl_sty = toc_lbl_sub if is_sub else toc_lbl_main
+        toc_rows.append([
+            Paragraph(num, num_sty),
+            Paragraph(lbl, lbl_sty),
+            Paragraph("." * 55, toc_dots_sty),
+        ])
+
+    # Number column widened to comfortably fit "1.4" / "4.3" etc. in bold
+    # 10pt without being forced to wrap character-by-character.
+    toc_t = Table(toc_rows, colWidths=[1.8*cm, 9*cm, None])
+    toc_t.setStyle(TableStyle([
+        ("VALIGN",        (0,0), (-1,-1), "BOTTOM"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING",    (0,0), (-1,-1), 0),
+        ("LEFTPADDING",   (0,0), (-1,-1), 0),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 4),
+    ]))
+    story.append(toc_t)
 
     story.append(PageBreak())
 
@@ -575,25 +675,30 @@ def generate_pdf(doc):
             story.append(Paragraph(step["text"], numbered))
         story.append(Spacer(1, 0.15*cm))
 
-    # Single-column process flowchart — paginated so it never exceeds one frame's height
+    # Single-column process flowchart — paginated so it never exceeds one frame's height.
+    # Box heights are now dynamic (based on wrapped title length), so chunks are built
+    # greedily by actually measuring each candidate chart's computed height.
     if steps:
         story.append(Spacer(1, 0.4*cm))
         story.append(Paragraph("Process Flowchart", h2s))
         story.append(Spacer(1, 0.2*cm))
 
-        # How many steps fit in one page's frame height before hitting the
-        # "too large" flowable error, with a safety margin.
-        avail_h   = (PAGE_H - TOP_M - BOT_M) - 1*cm
-        step_h    = (SwimlaneFlowchart.ROLE_LBL_H + SwimlaneFlowchart.BOX_H
-                     + SwimlaneFlowchart.V_GAP)
-        overhead  = 2 * SwimlaneFlowchart.LANE_PAD
-        max_steps = max(1, int((avail_h - overhead) // step_h))
+        avail_h = (PAGE_H - TOP_M - BOT_M) - 1*cm  # safety margin
+        chunks, current = [], []
+        for step in steps:
+            trial = current + [step]
+            if SwimlaneFlowchart(trial, avail_w).total_h > avail_h and current:
+                chunks.append(current)
+                current = [step]
+            else:
+                current = trial
+        if current:
+            chunks.append(current)
 
-        for i in range(0, len(steps), max_steps):
-            chunk = steps[i:i + max_steps]
+        for i, chunk in enumerate(chunks):
             chart = SwimlaneFlowchart(chunk, avail_w)
             story.append(chart)
-            if i + max_steps < len(steps):
+            if i < len(chunks) - 1:
                 story.append(PageBreak())
                 story.append(Paragraph("Process Flowchart (continued)", h2s))
                 story.append(Spacer(1, 0.2*cm))
@@ -1019,6 +1124,20 @@ def _render_document(sb, doc, uid):
     dept_label = doc.get("dept_label") or doc.get("dept","")
     st.markdown(f"<h3 style='text-align:center'>{dept_label.upper()}</h3>", unsafe_allow_html=True)
     st.markdown(f"<h2 style='text-align:center'>{title.upper()}</h2>", unsafe_allow_html=True)
+
+    approvals = doc.get("approvals") or []
+    if approvals:
+        cols = st.columns(len(approvals)+1)
+        labels = ["Department","Function","Signature","Date"]
+        with cols[0]:
+            for l in labels:
+                st.markdown(f"**{l}**")
+        for i, ap in enumerate(approvals):
+            with cols[i+1]:
+                st.markdown(ap.get("department",""))
+                st.markdown(f"*{_clean_approval_label(ap.get('function',''))}*")
+                st.markdown("&nbsp;")
+                st.markdown("&nbsp;")
 
     adoption = doc.get("date_of_adoption","—")
     st.markdown(f"<p style='text-align:center'><b>Date of Adoption:</b> {adoption}</p>",
