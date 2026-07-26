@@ -1302,6 +1302,13 @@ def show():
                 "approved outside this app — upload the file and log its control details here, "
                 "rather than rebuilding it through the procedure builder."
             )
+            st.info(
+                "**To attach a file to a document already in the master list** (e.g. an Excel "
+                "master list, a policy that was added via SQL), type its **exact** Document Code "
+                "and Title below — matching exactly will update that existing entry instead of "
+                "creating a duplicate. Example: code `NFP-EP-PL-XX-FM-01`, "
+                "title `Master List of Instruments`."
+            )
             with st.form("upload_existing_doc", clear_on_submit=True):
                 uc1, uc2 = st.columns(2)
                 with uc1:
@@ -1322,14 +1329,20 @@ def show():
 
                 submitted = st.form_submit_button("Upload & Save")
                 if submitted:
-                    if not up_code or not up_title:
-                        st.error("Document Code and Title are required.")
+                    up_code_clean  = (up_code or "").strip()
+                    up_title_clean = (up_title or "").strip()
+                    if not up_code_clean or not up_title_clean:
+                        st.error(
+                            "Document Code and Title are required. "
+                            f"Received code='{up_code!r}', title='{up_title!r}' — "
+                            "make sure both fields are filled in before clicking Upload & Save."
+                        )
                     else:
                         try:
                             file_url, file_name = None, None
                             if up_file is not None:
                                 file_bytes = up_file.getvalue()
-                                storage_path = f"{up_code.replace('/', '-')}/{up_file.name}"
+                                storage_path = f"{up_code_clean.replace('/', '-')}/{up_file.name}"
                                 sb.storage.from_("documents").upload(
                                     storage_path, file_bytes,
                                     {"content-type": up_file.type or "application/octet-stream",
@@ -1338,15 +1351,15 @@ def show():
                                 file_name = up_file.name
 
                             payload = {
-                                "doc_code":      up_code,
-                                "title":         up_title,
+                                "doc_code":      up_code_clean,
+                                "title":         up_title_clean,
                                 "doc_type":      up_cat,
                                 "category":      up_cat,
                                 "is_internal":   up_internal,
                                 "status":        up_status,
-                                "approved_by":   up_approved or None,
+                                "approved_by":   up_approved.strip() or None,
                                 "issue_date":    up_issue_date.isoformat() if up_issue_date else None,
-                                "revision_label":up_rev_label or None,
+                                "revision_label":up_rev_label.strip() or None,
                                 "revision_date": up_rev_date.isoformat() if up_rev_date else None,
                                 "reviewed_date": up_reviewed_date.isoformat() if up_reviewed_date else None,
                                 "created_by":    uid,
@@ -1355,13 +1368,13 @@ def show():
                                 payload["file_url"]  = file_url
                                 payload["file_name"] = file_name
 
-                            existing = sb.table("master_documents").select("id").eq("doc_code", up_code).execute()
+                            existing = sb.table("master_documents").select("id").eq("doc_code", up_code_clean).execute()
                             if existing.data:
-                                sb.table("master_documents").update(payload).eq("doc_code", up_code).execute()
-                                st.success(f"Updated existing master list entry for {up_code}.")
+                                sb.table("master_documents").update(payload).eq("doc_code", up_code_clean).execute()
+                                st.success(f"Updated existing master list entry for {up_code_clean}.")
                             else:
                                 sb.table("master_documents").insert(payload).execute()
-                                st.success(f"Added {up_code} to the master list.")
+                                st.success(f"Added {up_code_clean} to the master list.")
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error uploading document: {e}")
