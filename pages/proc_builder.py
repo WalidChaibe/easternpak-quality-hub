@@ -164,6 +164,10 @@ class SwimlaneFlowchart(Flowable):
         (step type "input_row"), matching multiple inputs feeding one step
       - a horizontal side-branch off any step (e.g. a parallel procedure
         that gets triggered), drawn to the right with its own arrow
+      - a decision that splits into two (or more) parallel multi-step
+        branches that later merge back into a single point (step type
+        "branch_split"), e.g. "Outsource Calibration? Yes/No" each leading
+        down their own short sequence before rejoining the main flow
 
     Everything else is a single centered step column, same as before.
     Box/row heights are computed up front from the actual wrapped text, so
@@ -183,6 +187,12 @@ class SwimlaneFlowchart(Flowable):
     FONT_SZ      = 8
     ROLE_FONT_SZ = 6.3
     LINE_H       = FONT_SZ + 2.4
+
+    BRANCH_COL_W  = 5.0*cm     # width of each column inside a branch_split
+    BRANCH_GAP    = 0.5*cm     # gap between branch columns
+    BRANCH_V_GAP  = 0.55*cm    # vertical gap between boxes within a branch column
+    BRANCH_FONT_SZ= 7.3
+    BRANCH_LBL_H  = 0.4*cm     # space for the branch label ("YES - External") above its column
 
     BOX_FILL     = colors.HexColor("#EAF3FB")
     BOX_BORDER   = NAPCO_BLUE
@@ -229,6 +239,30 @@ class SwimlaneFlowchart(Flowable):
                 })
                 continue
 
+            if stype == "branch_split":
+                branches = step.get("branches", [])
+                prepared_branches = []
+                for br in branches:
+                    br_steps = []
+                    col_h = self.BRANCH_LBL_H
+                    for s in br.get("steps", []):
+                        lines = _wrap_words(s.get("title",""), self.FONT,
+                                             self.BRANCH_FONT_SZ, self.BRANCH_COL_W - 0.6*cm)
+                        text_h = len(lines) * (self.BRANCH_FONT_SZ + 2.2)
+                        box_h  = max(0.9*cm, text_h + 0.3*cm)
+                        br_steps.append({"lines": lines, "box_h": box_h})
+                        col_h += box_h + self.BRANCH_V_GAP
+                    prepared_branches.append({
+                        "label": br.get("label",""), "steps": br_steps, "col_h": col_h,
+                    })
+                max_col_h = max((b["col_h"] for b in prepared_branches), default=0)
+                bus_h = 0.6*cm  # room for the converging arrows below the columns
+                self._prepared.append({
+                    "type": "branch_split", "branches": prepared_branches,
+                    "max_col_h": max_col_h, "bus_h": bus_h, "box_h": max_col_h + bus_h,
+                })
+                continue
+
             shape = step.get("shape", "rect")
             title = step.get("title", "")
             max_w = (self.DIA_W - 1.3*cm) if shape == "diamond" else (self.BOX_W - 0.7*cm)
@@ -256,7 +290,7 @@ class SwimlaneFlowchart(Flowable):
 
         self._step_heights = []
         for p in self._prepared:
-            lbl_h = 0 if p["type"] == "input_row" else self.ROLE_LBL_H
+            lbl_h = self.ROLE_LBL_H if p["type"] == "step" else 0
             self._step_heights.append(lbl_h + p["box_h"] + self.V_GAP)
 
         self.total_h = self.LANE_PAD + sum(self._step_heights) + self.LANE_PAD
@@ -266,7 +300,7 @@ class SwimlaneFlowchart(Flowable):
         """Returns (center_y, box_h) for step idx, from the bottom of the flowable."""
         y_from_top = self.LANE_PAD + sum(self._step_heights[:idx])
         p = self._prepared[idx]
-        lbl_h = 0 if p["type"] == "input_row" else self.ROLE_LBL_H
+        lbl_h = self.ROLE_LBL_H if p["type"] == "step" else 0
         y_from_top += lbl_h + p["box_h"] / 2
         return self.total_h - y_from_top, p["box_h"]
 
@@ -310,6 +344,8 @@ class SwimlaneFlowchart(Flowable):
         for idx, step in enumerate(self.steps):
             p  = self._prepared[idx]
             cy, bh = self._step_geom(idx)
+            next_is_branch_split = (idx < len(self.steps) - 1
+                                     and self._prepared[idx + 1]["type"] == "branch_split")
 
             # ── Fan-in input row ──────────────────────────────
             if p["type"] == "input_row":
@@ -330,14 +366,83 @@ class SwimlaneFlowchart(Flowable):
                     self._draw_centered_lines(c, bx_c, row_cy, lines,
                                                self.FONT, self.ROLE_FONT_SZ + 0.7)
 
-                # Converging "fan-in" arrows: stub down from each box to a
-                # shared bus line, then one arrow down into the next step.
                 bus_y = row_cy - row_h / 2 - bus_h * 0.5
                 c.setStrokeColor(self.ARROW_COLOR)
                 c.setLineWidth(1.0)
                 for bx_c in centers:
                     c.line(bx_c, row_cy - row_h / 2, bx_c, bus_y)
                 c.line(min(centers), bus_y, max(centers), bus_y)
+
+                if idx < len(self.steps) - 1:
+                    next_cy, next_bh = self._step_geom(idx + 1)
+                    next_top = next_cy + next_bh / 2
+                    y_end = next_top + 0.06*cm
+                    c.setFillColor(self.ARROW_COLOR)
+                    c.line(cx, bus_y, cx, y_end)
+                    _draw_arrowhead(c, cx, y_end, self.ARROW_COLOR)
+                continue
+
+            # ── Branch split: decision fans out into parallel columns, ──
+            # ── each column runs its own steps, then all columns merge ──
+            if p["type"] == "branch_split":
+                branches  = p["branches"]
+                n         = len(branches)
+                gap       = self.BRANCH_GAP
+                total_w   = n * self.BRANCH_COL_W + (n - 1) * gap
+                start_x   = cx - total_w / 2
+                block_top = cy + bh / 2   # top of this whole block (right below the decision)
+
+                # Fan-out from the previous step's bottom into a shared bus,
+                # then down into each column.
+                col_centers = [start_x + i * (self.BRANCH_COL_W + gap) + self.BRANCH_COL_W / 2
+                               for i in range(n)]
+                if idx > 0:
+                    prev_cy, prev_bh = self._step_geom(idx - 1)
+                    prev_bottom = prev_cy - prev_bh / 2
+                    fanout_bus_y = block_top - 0.15*cm
+                    c.setStrokeColor(self.ARROW_COLOR)
+                    c.setLineWidth(1.0)
+                    c.line(cx, prev_bottom, cx, fanout_bus_y)
+                    c.line(min(col_centers), fanout_bus_y, max(col_centers), fanout_bus_y)
+                    for col_cx in col_centers:
+                        y_end = block_top - self.BRANCH_LBL_H + 0.06*cm
+                        c.line(col_cx, fanout_bus_y, col_cx, y_end)
+                        _draw_arrowhead(c, col_cx, y_end, self.ARROW_COLOR)
+
+                col_bottoms = []
+                for bi, br in enumerate(branches):
+                    col_cx = col_centers[bi]
+                    c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
+                    c.setFillColor(self.ARROW_COLOR)
+                    c.drawCentredString(col_cx, block_top - self.BRANCH_LBL_H + 0.12*cm, br["label"])
+
+                    y_cursor = block_top - self.BRANCH_LBL_H
+                    prev_box_bottom = None
+                    for s in br["steps"]:
+                        box_h  = s["box_h"]
+                        box_cy = y_cursor - box_h / 2
+                        self._draw_box(c, col_cx, box_cy, self.BRANCH_COL_W, box_h,
+                                        self.BOX_FILL, self.BOX_BORDER, radius=6)
+                        self._draw_centered_lines(c, col_cx, box_cy, s["lines"],
+                                                   self.FONT, self.BRANCH_FONT_SZ)
+                        if prev_box_bottom is not None:
+                            c.setStrokeColor(self.ARROW_COLOR)
+                            c.setFillColor(self.ARROW_COLOR)
+                            c.setLineWidth(1.0)
+                            y_end = box_cy + box_h / 2 + 0.05*cm
+                            c.line(col_cx, prev_box_bottom, col_cx, y_end)
+                            _draw_arrowhead(c, col_cx, y_end, self.ARROW_COLOR)
+                        y_cursor -= box_h + self.BRANCH_V_GAP
+                        prev_box_bottom = box_cy - box_h / 2
+                    col_bottoms.append(prev_box_bottom)
+
+                # Fan-in: converge all column bottoms into the next step.
+                bus_y = min(col_bottoms) - (p["bus_h"] * 0.5 if col_bottoms else 0)
+                c.setStrokeColor(self.ARROW_COLOR)
+                c.setLineWidth(1.0)
+                for cb, col_cx in zip(col_bottoms, col_centers):
+                    c.line(col_cx, cb, col_cx, bus_y)
+                c.line(min(col_centers), bus_y, max(col_centers), bus_y)
 
                 if idx < len(self.steps) - 1:
                     next_cy, next_bh = self._step_geom(idx + 1)
@@ -392,8 +497,9 @@ class SwimlaneFlowchart(Flowable):
                 c.line(x_start, cy, x_end, cy)
                 _draw_arrowhead_right(c, x_end, cy, self.ARROW_COLOR)
 
-            # ── Arrow down to next step ────────────────────────
-            if idx < len(self.steps) - 1:
+            # ── Arrow down to next step (skipped if the next step is a ──
+            # ── branch_split — it draws its own fan-out from our bottom) ──
+            if idx < len(self.steps) - 1 and not next_is_branch_split:
                 next_cy, next_bh = self._step_geom(idx + 1)
                 next_top = next_cy + next_bh / 2
 
@@ -776,13 +882,23 @@ def generate_pdf(doc):
     steps = doc.get("procedure_steps") or []
     step_num = 0
     for step in steps:
-        if step.get("type", "step") == "input_row":
+        stype = step.get("type", "step")
+
+        if stype == "input_row":
             items = step.get("items", [])
             titles = "; ".join(it.get("title", "") for it in items)
-            story.append(Paragraph("Trigger Sources", h2s))
-            story.append(Paragraph(
-                "A Corrective and Preventive Action Request (CPAR) may be triggered by any "
-                f"of the following: {titles}.", numbered))
+            heading = step.get("heading", "Trigger Sources")
+            intro   = step.get("intro", "This process may be triggered by any of the following")
+            story.append(Paragraph(heading, h2s))
+            story.append(Paragraph(f"{intro}: {titles}.", numbered))
+            story.append(Spacer(1, 0.15*cm))
+            continue
+
+        if stype == "branch_split":
+            for br in step.get("branches", []):
+                story.append(Paragraph(f"<b>{br.get('label','')}</b>", numbered))
+                for s in br.get("steps", []):
+                    story.append(Paragraph(f"• {s.get('title','')}", numbered))
             story.append(Spacer(1, 0.15*cm))
             continue
 
@@ -1524,11 +1640,20 @@ def _render_document(sb, doc, uid):
     steps = doc.get("procedure_steps") or []
     step_num = 0
     for step in steps:
-        if step.get("type", "step") == "input_row":
+        stype = step.get("type", "step")
+        if stype == "input_row":
             items = step.get("items", [])
             titles = "; ".join(it.get("title", "") for it in items)
-            st.markdown("**Trigger Sources**")
-            st.markdown(f"A CPAR may be triggered by any of the following: {titles}.")
+            heading = step.get("heading", "Trigger Sources")
+            intro   = step.get("intro", "This process may be triggered by any of the following")
+            st.markdown(f"**{heading}**")
+            st.markdown(f"{intro}: {titles}.")
+            continue
+        if stype == "branch_split":
+            for br in step.get("branches", []):
+                st.markdown(f"**{br.get('label','')}**")
+                for s in br.get("steps", []):
+                    st.markdown(f"- {s.get('title','')}")
             continue
         step_num += 1
         st.markdown(f"**{step_num}. {step.get('title','')}**")
