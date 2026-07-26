@@ -83,6 +83,21 @@ def build_mermaid(steps, lanes):
         lines.append(f"    {src} -->|{conn}| {dst}" if conn else f"    {src} --> {dst}")
     return "\n".join(lines)
 
+_CATEGORY_MAP = {
+    "PD": "Procedure", "PR": "Procedure", "PROCEDURE": "Procedure",
+    "FM": "Form", "FORM": "Form",
+    "WI": "Work Instruction", "WORK INSTRUCTION": "Work Instruction",
+    "PO": "Policy", "POL": "Policy", "POLICY": "Policy",
+}
+
+def _normalize_category(doc_type):
+    """Map internal doc_type abbreviations (PD, FM, WI, ...) to the same
+    human-readable category used everywhere else, so the same kind of
+    document never displays under two different labels."""
+    if not doc_type:
+        return "Other"
+    return _CATEGORY_MAP.get(doc_type.strip().upper(), doc_type)
+
 def check_or_add_master(sb, code, title, doc_type, is_internal, uid):
     if not code and not title: return
     key = code or title
@@ -91,7 +106,8 @@ def check_or_add_master(sb, code, title, doc_type, is_internal, uid):
         try:
             sb.table("master_documents").insert({
                 "doc_code": key, "title": title or key,
-                "doc_type": doc_type, "is_internal": is_internal, "created_by": uid,
+                "doc_type": doc_type, "category": _normalize_category(doc_type),
+                "is_internal": is_internal, "created_by": uid,
             }).execute()
         except Exception:
             pass
