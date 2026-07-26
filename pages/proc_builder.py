@@ -131,6 +131,16 @@ def _draw_arrowhead(canvas, x, y, color):
     canvas.setStrokeColor(color)
     canvas.drawPath(p, fill=1, stroke=0)
 
+def _draw_arrowhead_right(canvas, x, y, color):
+    p = canvas.beginPath()
+    p.moveTo(x, y)
+    p.lineTo(x - 0.22*cm, y + 0.12*cm)
+    p.lineTo(x - 0.22*cm, y - 0.12*cm)
+    p.close()
+    canvas.setFillColor(color)
+    canvas.setStrokeColor(color)
+    canvas.drawPath(p, fill=1, stroke=0)
+
 def _wrap_words(text, font, size, max_width):
     """Greedy word-wrap: returns a list of lines that each fit within max_width."""
     words = (text or "").split()
@@ -149,15 +159,20 @@ def _wrap_words(text, font, size, max_width):
     return lines
 
 class SwimlaneFlowchart(Flowable):
-    """Draws a clean, single-column top-down process flowchart. Each step is
-    a rounded box with a soft drop shadow and a small role "chip" above it;
-    decision points are diamonds. Box heights are computed from the actual
-    wrapped text up front (not fixed), so long titles never overflow their
-    box, and spacing stays even throughout."""
+    """Draws a top-down process flowchart with support for:
+      - a horizontal row of parallel "trigger" boxes that fan into one point
+        (step type "input_row"), matching multiple inputs feeding one step
+      - a horizontal side-branch off any step (e.g. a parallel procedure
+        that gets triggered), drawn to the right with its own arrow
 
-    BOX_W        = 8.6*cm
+    Everything else is a single centered step column, same as before.
+    Box/row heights are computed up front from the actual wrapped text, so
+    nothing overflows regardless of title length.
+    """
+
+    BOX_W        = 7.6*cm
     MIN_BOX_H    = 1.0*cm
-    DIA_W        = 6.6*cm
+    DIA_W        = 6.2*cm
     MIN_DIA_H    = 1.7*cm
     V_GAP        = 1.05*cm     # vertical gap between steps (room for arrow + label)
     ROLE_LBL_H   = 0.55*cm     # space reserved above each box for the role chip
@@ -173,119 +188,213 @@ class SwimlaneFlowchart(Flowable):
     BOX_BORDER   = NAPCO_BLUE
     DIA_FILL     = colors.HexColor("#FFF6D8")
     DIA_BORDER   = colors.HexColor("#C9A227")
+    BRANCH_FILL  = colors.HexColor("#FCEAEA")
+    BRANCH_BORDER= colors.HexColor("#B03A3A")
     SHADOW_COLOR = colors.HexColor("#DADADA")
     ARROW_COLOR  = colors.HexColor("#4A4A4A")
 
     def __init__(self, steps, available_width, all_lanes=None):
-        # all_lanes accepted for backward compatibility with callers but is
-        # unused now that the chart is a single column.
+        # all_lanes accepted for backward compatibility; unused.
         super().__init__()
         self.steps   = steps
         self.avail_w = available_width
         self.width   = available_width
 
-        # Pre-compute wrapped title lines + required box height for every
-        # step. This is done up front (not during draw) so total height and
-        # per-step spacing are exact, and no title can overflow its box.
+        # If any step has a side-branch, shift the main column left so
+        # there's room on the right for the branch box.
+        self._has_branch = any(s.get("side_branch") for s in steps
+                                if s.get("type", "step") == "step")
+        self.cx = self.width * 0.36 if self._has_branch else self.width / 2
+
         self._prepared = []
         for step in steps:
+            stype = step.get("type", "step")
+
+            if stype == "input_row":
+                items = step.get("items", [])
+                n = max(1, len(items))
+                gap = 0.22*cm
+                item_w = min(3.4*cm, (self.width - gap*(n-1) - 2*self.LANE_PAD) / n)
+                prepared_items, max_lines = [], 1
+                for it in items:
+                    lines = _wrap_words(it.get("title",""), self.FONT,
+                                         self.ROLE_FONT_SZ + 0.7, item_w - 0.3*cm)
+                    prepared_items.append(lines)
+                    max_lines = max(max_lines, len(lines))
+                row_h = max(1.0*cm, max_lines * (self.ROLE_FONT_SZ + 2.6) + 0.25*cm)
+                bus_h = 0.6*cm  # room for the converging arrows below the row
+                self._prepared.append({
+                    "type": "input_row", "items": prepared_items, "item_w": item_w,
+                    "row_h": row_h, "box_h": row_h + bus_h, "bus_h": bus_h,
+                })
+                continue
+
             shape = step.get("shape", "rect")
             title = step.get("title", "")
-            if shape == "diamond":
-                max_w = self.DIA_W - 1.3*cm
-            else:
-                max_w = self.BOX_W - 0.7*cm
+            max_w = (self.DIA_W - 1.3*cm) if shape == "diamond" else (self.BOX_W - 0.7*cm)
             lines  = _wrap_words(title, self.FONT, self.FONT_SZ, max_w)
             text_h = len(lines) * self.LINE_H
             if shape == "diamond":
                 box_h = max(self.MIN_DIA_H, text_h + 0.7*cm)
             else:
                 box_h = max(self.MIN_BOX_H, text_h + 0.35*cm)
-            self._prepared.append({"shape": shape, "lines": lines, "box_h": box_h})
 
-        self._step_heights = [self.ROLE_LBL_H + p["box_h"] + self.V_GAP
-                               for p in self._prepared]
+            side_prepared = None
+            side = step.get("side_branch")
+            if side:
+                side_w = self.width - (self.cx + self.BOX_W/2) - 1.1*cm
+                side_w = max(2.6*cm, min(side_w, 5.6*cm))
+                side_lines = _wrap_words(side.get("title",""), self.FONT,
+                                          self.FONT_SZ - 0.5, side_w - 0.5*cm)
+                side_h = max(0.95*cm, len(side_lines) * self.LINE_H + 0.3*cm)
+                side_prepared = {"lines": side_lines, "w": side_w, "box_h": side_h}
+
+            self._prepared.append({
+                "type": "step", "shape": shape, "lines": lines, "box_h": box_h,
+                "side_branch": side_prepared,
+            })
+
+        self._step_heights = []
+        for p in self._prepared:
+            lbl_h = 0 if p["type"] == "input_row" else self.ROLE_LBL_H
+            self._step_heights.append(lbl_h + p["box_h"] + self.V_GAP)
+
         self.total_h = self.LANE_PAD + sum(self._step_heights) + self.LANE_PAD
         self.height  = self.total_h
 
     def _step_geom(self, idx):
         """Returns (center_y, box_h) for step idx, from the bottom of the flowable."""
         y_from_top = self.LANE_PAD + sum(self._step_heights[:idx])
-        box_h = self._prepared[idx]["box_h"]
-        y_from_top += self.ROLE_LBL_H + box_h / 2
-        return self.total_h - y_from_top, box_h
+        p = self._prepared[idx]
+        lbl_h = 0 if p["type"] == "input_row" else self.ROLE_LBL_H
+        y_from_top += lbl_h + p["box_h"] / 2
+        return self.total_h - y_from_top, p["box_h"]
+
+    def _draw_box(self, c, cx, cy, bw, bh, fill, border, radius=8):
+        c.setFillColor(self.SHADOW_COLOR)
+        c.roundRect(cx - bw/2 + 0.08*cm, cy - bh/2 - 0.08*cm, bw, bh, radius=radius, fill=1, stroke=0)
+        c.setFillColor(fill)
+        c.setStrokeColor(border)
+        c.setLineWidth(1.2)
+        c.roundRect(cx - bw/2, cy - bh/2, bw, bh, radius=radius, fill=1, stroke=1)
+
+    def _draw_role_chip(self, c, cx, top_y, role):
+        role_txt = role.upper()
+        c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
+        chip_w = stringWidth(role_txt, self.FONT_B, self.ROLE_FONT_SZ) + 0.34*cm
+        chip_h = 0.36*cm
+        chip_y = top_y + 0.09*cm
+        c.setFillColor(NAPCO_BLUE)
+        c.roundRect(cx - chip_w/2, chip_y, chip_w, chip_h, radius=chip_h/2, fill=1, stroke=0)
+        c.setFillColor(colors.white)
+        c.drawCentredString(cx, chip_y + 0.10*cm, role_txt)
+
+    def _draw_centered_lines(self, c, cx, cy, lines, font, size, color=None):
+        c.setFillColor(color or DARK_TEXT)
+        c.setFont(font, size)
+        line_h = size + 2.4
+        start_y = cy + (len(lines) - 1) * line_h / 2
+        for li, ln in enumerate(lines):
+            c.drawCentredString(cx, start_y - li * line_h, ln)
 
     def draw(self):
         c  = self.canv
-        cx = self.width / 2
-        c.setLineCap(1)   # round line caps
-        c.setLineJoin(1)  # round line joins — softer arrow/line corners
+        cx = self.cx
+        c.setLineCap(1)
+        c.setLineJoin(1)
 
-        # Subtle outer border around the whole chart area
         c.setStrokeColor(colors.HexColor("#DDDDDD"))
         c.setLineWidth(0.6)
         c.roundRect(1, 1, self.width - 2, self.total_h - 2, radius=6, fill=0, stroke=1)
 
         for idx, step in enumerate(self.steps):
-            p     = self._prepared[idx]
+            p  = self._prepared[idx]
+            cy, bh = self._step_geom(idx)
+
+            # ── Fan-in input row ──────────────────────────────
+            if p["type"] == "input_row":
+                item_w, row_h, bus_h = p["item_w"], p["row_h"], p["bus_h"]
+                n = len(p["items"])
+                gap = 0.22*cm
+                total_w = n * item_w + (n - 1) * gap
+                start_x = (self.width - total_w) / 2
+                row_cy  = cy + bus_h / 2
+
+                centers = []
+                for i, lines in enumerate(p["items"]):
+                    bx = start_x + i * (item_w + gap)
+                    bx_c = bx + item_w / 2
+                    centers.append(bx_c)
+                    self._draw_box(c, bx_c, row_cy, item_w, row_h,
+                                    self.BOX_FILL, self.BOX_BORDER, radius=6)
+                    self._draw_centered_lines(c, bx_c, row_cy, lines,
+                                               self.FONT, self.ROLE_FONT_SZ + 0.7)
+
+                # Converging "fan-in" arrows: stub down from each box to a
+                # shared bus line, then one arrow down into the next step.
+                bus_y = row_cy - row_h / 2 - bus_h * 0.5
+                c.setStrokeColor(self.ARROW_COLOR)
+                c.setLineWidth(1.0)
+                for bx_c in centers:
+                    c.line(bx_c, row_cy - row_h / 2, bx_c, bus_y)
+                c.line(min(centers), bus_y, max(centers), bus_y)
+
+                if idx < len(self.steps) - 1:
+                    next_cy, next_bh = self._step_geom(idx + 1)
+                    next_top = next_cy + next_bh / 2
+                    y_end = next_top + 0.06*cm
+                    c.setFillColor(self.ARROW_COLOR)
+                    c.line(cx, bus_y, cx, y_end)
+                    _draw_arrowhead(c, cx, y_end, self.ARROW_COLOR)
+                continue
+
+            # ── Regular step (rect / diamond) ─────────────────
             shape = p["shape"]
             lines = p["lines"]
             role  = step.get("swimlane", "")
             conn  = step.get("connection_label", "")
-            cy, bh = self._step_geom(idx)
 
             if shape == "diamond":
                 hw, hh = self.DIA_W / 2, bh / 2
-                # Soft shadow (offset duplicate, no border)
                 off = 0.08*cm
                 shadow_pts = [cx+off, cy+hh-off, cx+hw+off, cy-off,
                               cx+off, cy-hh-off, cx-hw+off, cy-off]
-                c.setFillColor(self.SHADOW_COLOR)
-                c.setStrokeColor(self.SHADOW_COLOR)
                 _draw_filled_poly(c, shadow_pts, self.SHADOW_COLOR, self.SHADOW_COLOR)
-                # Main diamond
                 pts = [cx, cy+hh, cx+hw, cy, cx, cy-hh, cx-hw, cy]
                 c.setLineWidth(1.2)
                 _draw_filled_poly(c, pts, self.DIA_FILL, self.DIA_BORDER)
                 box_top, box_bottom = cy + hh, cy - hh
             else:
-                bw = self.BOX_W
-                radius = 8
-                # Soft shadow
-                c.setFillColor(self.SHADOW_COLOR)
-                c.roundRect(cx - bw/2 + 0.08*cm, cy - bh/2 - 0.08*cm, bw, bh,
-                            radius=radius, fill=1, stroke=0)
-                # Main box
-                c.setFillColor(self.BOX_FILL)
-                c.setStrokeColor(self.BOX_BORDER)
-                c.setLineWidth(1.2)
-                c.roundRect(cx - bw/2, cy - bh/2, bw, bh, radius=radius, fill=1, stroke=1)
+                self._draw_box(c, cx, cy, self.BOX_W, bh, self.BOX_FILL, self.BOX_BORDER)
                 box_top, box_bottom = cy + bh/2, cy - bh/2
 
-            # Role "chip" above the box
             if role:
-                role_txt = role.upper()
-                c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
-                chip_w = stringWidth(role_txt, self.FONT_B, self.ROLE_FONT_SZ) + 0.34*cm
-                chip_h = 0.36*cm
-                chip_y = box_top + 0.09*cm
-                c.setFillColor(NAPCO_BLUE)
-                c.roundRect(cx - chip_w/2, chip_y, chip_w, chip_h,
-                            radius=chip_h/2, fill=1, stroke=0)
-                c.setFillColor(colors.white)
-                c.drawCentredString(cx, chip_y + 0.10*cm, role_txt)
+                self._draw_role_chip(c, cx, box_top, role)
 
-            # Title text — vertically centered, already wrapped to fit
-            c.setFillColor(DARK_TEXT)
-            c.setFont(self.FONT, self.FONT_SZ)
-            start_y = cy + (len(lines) - 1) * self.LINE_H / 2
-            for li, ln in enumerate(lines):
-                c.drawCentredString(cx, start_y - li * self.LINE_H, ln)
+            self._draw_centered_lines(c, cx, cy, lines, self.FONT, self.FONT_SZ)
 
-            # Arrow to next step
+            # ── Side branch (e.g. a parallel procedure this step triggers) ──
+            if p.get("side_branch"):
+                sb = p["side_branch"]
+                sb_w, sb_h = sb["w"], sb["box_h"]
+                sb_x  = cx + self.BOX_W/2 + 1.0*cm
+                sb_cx = sb_x + sb_w/2
+
+                self._draw_box(c, sb_cx, cy, sb_w, sb_h,
+                                self.BRANCH_FILL, self.BRANCH_BORDER, radius=6)
+                self._draw_centered_lines(c, sb_cx, cy, sb["lines"], self.FONT, self.FONT_SZ - 0.5)
+
+                c.setStrokeColor(self.ARROW_COLOR)
+                c.setFillColor(self.ARROW_COLOR)
+                c.setLineWidth(1.1)
+                x_start = cx + self.BOX_W/2
+                x_end   = sb_x - 0.05*cm
+                c.line(x_start, cy, x_end, cy)
+                _draw_arrowhead_right(c, x_end, cy, self.ARROW_COLOR)
+
+            # ── Arrow down to next step ────────────────────────
             if idx < len(self.steps) - 1:
                 next_cy, next_bh = self._step_geom(idx + 1)
-                next_shape = self._prepared[idx + 1]["shape"]
                 next_top = next_cy + next_bh / 2
 
                 c.setStrokeColor(self.ARROW_COLOR)
@@ -295,7 +404,6 @@ class SwimlaneFlowchart(Flowable):
                 c.line(cx, box_bottom, cx, y_end)
                 _draw_arrowhead(c, cx, y_end, self.ARROW_COLOR)
 
-                # Connection label drawn as a small pill badge on the arrow
                 if conn:
                     mid_y = (box_bottom + y_end) / 2
                     c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
@@ -309,9 +417,6 @@ class SwimlaneFlowchart(Flowable):
                                 radius=label_h/2, fill=1, stroke=1)
                     c.setFillColor(self.ARROW_COLOR)
                     c.drawCentredString(lx + label_w/2, mid_y - 0.09*cm, conn)
-
-
-
 
 # ─────────────────────────────────────────────
 # PDF GENERATION
@@ -669,10 +774,25 @@ def generate_pdf(doc):
     story.append(Paragraph("3.0 Procedure (Narrative or Flowchart)", h1s))
 
     steps = doc.get("procedure_steps") or []
-    for i, step in enumerate(steps, 1):
-        story.append(Paragraph(f"{i}. {step.get('title','')}", h2s))
+    step_num = 0
+    for step in steps:
+        if step.get("type", "step") == "input_row":
+            items = step.get("items", [])
+            titles = "; ".join(it.get("title", "") for it in items)
+            story.append(Paragraph("Trigger Sources", h2s))
+            story.append(Paragraph(
+                "A Corrective and Preventive Action Request (CPAR) may be triggered by any "
+                f"of the following: {titles}.", numbered))
+            story.append(Spacer(1, 0.15*cm))
+            continue
+
+        step_num += 1
+        story.append(Paragraph(f"{step_num}. {step.get('title','')}", h2s))
         if step.get("text"):
             story.append(Paragraph(step["text"], numbered))
+        if step.get("side_branch"):
+            sb_title = step["side_branch"].get("title", "")
+            story.append(Paragraph(f"→ In parallel: {sb_title}", numbered))
         story.append(Spacer(1, 0.15*cm))
 
     # Single-column process flowchart — paginated so it never exceeds one frame's height.
@@ -1178,10 +1298,21 @@ def _render_document(sb, doc, uid):
     st.markdown("---")
     st.markdown("### 3.0 Procedure")
     steps = doc.get("procedure_steps") or []
-    for i, step in enumerate(steps, 1):
-        st.markdown(f"**{i}. {step.get('title','')}**")
+    step_num = 0
+    for step in steps:
+        if step.get("type", "step") == "input_row":
+            items = step.get("items", [])
+            titles = "; ".join(it.get("title", "") for it in items)
+            st.markdown("**Trigger Sources**")
+            st.markdown(f"A CPAR may be triggered by any of the following: {titles}.")
+            continue
+        step_num += 1
+        st.markdown(f"**{step_num}. {step.get('title','')}**")
         if step.get("text"):
             st.markdown(step["text"])
+        if step.get("side_branch"):
+            st.markdown(f"→ *In parallel:* {step['side_branch'].get('title','')}")
+
 
     st.markdown("---")
     st.markdown("### 4.0 Associated Documentation")
