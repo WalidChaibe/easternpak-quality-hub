@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
 import base64
 import requests
 import io
@@ -1179,14 +1179,104 @@ def show():
         st.markdown("### 📚 Master Document List")
         st.caption("All documents referenced anywhere in the system — internal and external.")
 
+        # ── Upload an already-existing document (form/policy/work instruction) ──
+        with st.expander("📤 Upload an Existing Document"):
+            st.caption(
+                "For forms, policies, and work instructions that are already finished and "
+                "approved outside this app — upload the file and log its control details here, "
+                "rather than rebuilding it through the procedure builder."
+            )
+            with st.form("upload_existing_doc", clear_on_submit=True):
+                uc1, uc2 = st.columns(2)
+                with uc1:
+                    up_code  = st.text_input("Document Code*", placeholder="e.g. FM:03.10 or NFP-EP-...")
+                    up_title = st.text_input("Title*", placeholder="e.g. Corrective & Preventive Action Request")
+                    up_cat   = st.selectbox("Category*",
+                                             ["Procedure","Policy","Work Instruction","Form","External Standard","Other"])
+                    up_internal = st.checkbox("Internal document", value=True)
+                with uc2:
+                    up_issue_date = st.date_input("Issue Date", value=None)
+                    up_rev_label  = st.text_input("Revision (as printed on the document)", placeholder="e.g. Rev 5 or 00")
+                    up_rev_date   = st.date_input("Revision Date", value=None)
+                    up_approved   = st.text_input("Approved By", placeholder="e.g. Executive Director / ED")
+
+                up_reviewed_date = st.date_input("Reviewed Date (for the yearly review cycle)", value=None)
+                up_status  = st.selectbox("Status", ["Active","Draft","Obsolete","Superseded"])
+                up_file    = st.file_uploader("File", type=["pdf","docx","doc","xlsx","xls","png","jpg","jpeg"])
+
+                submitted = st.form_submit_button("Upload & Save")
+                if submitted:
+                    if not up_code or not up_title:
+                        st.error("Document Code and Title are required.")
+                    else:
+                        try:
+                            file_url, file_name = None, None
+                            if up_file is not None:
+                                file_bytes = up_file.getvalue()
+                                storage_path = f"{up_code.replace('/', '-')}/{up_file.name}"
+                                sb.storage.from_("documents").upload(
+                                    storage_path, file_bytes,
+                                    {"content-type": up_file.type or "application/octet-stream",
+                                     "upsert": "true"})
+                                file_url  = sb.storage.from_("documents").get_public_url(storage_path)
+                                file_name = up_file.name
+
+                            payload = {
+                                "doc_code":      up_code,
+                                "title":         up_title,
+                                "doc_type":      up_cat,
+                                "category":      up_cat,
+                                "is_internal":   up_internal,
+                                "status":        up_status,
+                                "approved_by":   up_approved or None,
+                                "issue_date":    up_issue_date.isoformat() if up_issue_date else None,
+                                "revision_label":up_rev_label or None,
+                                "revision_date": up_rev_date.isoformat() if up_rev_date else None,
+                                "reviewed_date": up_reviewed_date.isoformat() if up_reviewed_date else None,
+                                "created_by":    uid,
+                            }
+                            if file_url:
+                                payload["file_url"]  = file_url
+                                payload["file_name"] = file_name
+
+                            existing = sb.table("master_documents").select("id").eq("doc_code", up_code).execute()
+                            if existing.data:
+                                sb.table("master_documents").update(payload).eq("doc_code", up_code).execute()
+                                st.success(f"Updated existing master list entry for {up_code}.")
+                            else:
+                                sb.table("master_documents").insert(payload).execute()
+                                st.success(f"Added {up_code} to the master list.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error uploading document: {e}")
+
         res     = sb.table("master_documents").select("*").order("doc_code").execute()
         masters = res.data or []
 
-        c1, c2 = st.columns(2)
+        today = date.today()
+
+        def _next_review(m):
+            """Next review = reviewed_date + 1 year. Returns None if never reviewed."""
+            rd_raw = m.get("reviewed_date")
+            if not rd_raw:
+                return None
+            try:
+                rd = date.fromisoformat(str(rd_raw)[:10])
+                return rd.replace(year=rd.year + 1)
+            except Exception:
+                return None
+
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             int_f = st.selectbox("Source", ["All","Internal","External"])
         with c2:
             msearch = st.text_input("Search", placeholder="code or title")
+        with c3:
+            review_f = st.selectbox("Review status",
+                                     ["All","Never reviewed","Due soon (30 days)","Overdue","Obsolete"])
+        with c4:
+            cat_options = ["All","Procedure","Policy","Work Instruction","Form","External Standard","Other"]
+            cat_f = st.selectbox("Category", cat_options)
 
         if int_f == "Internal":
             masters = [m for m in masters if m.get("is_internal")]
@@ -1197,16 +1287,150 @@ def show():
             masters = [m for m in masters
                        if s in (m.get("doc_code","") or "").lower()
                        or s in (m.get("title","") or "").lower()]
+        if cat_f != "All":
+            masters = [m for m in masters
+                       if (m.get("category") or m.get("doc_type") or "") == cat_f]
+        if review_f != "All":
+            def _matches(m):
+                is_obsolete = (m.get("status") == "Obsolete")
+                if review_f == "Obsolete":
+                    return is_obsolete
+                if is_obsolete:
+                    # Obsolete docs are out of the active review cycle —
+                    # they don't count as never-reviewed/due/overdue.
+                    return False
+                nr = _next_review(m)
+                if review_f == "Never reviewed":
+                    return nr is None
+                if nr is None:
+                    return False
+                if review_f == "Overdue":
+                    return nr <= today
+                if review_f == "Due soon (30 days)":
+                    return today < nr <= today + timedelta(days=30)
+                return True
+            masters = [m for m in masters if _matches(m)]
 
         if not masters:
             st.info("No documents in master list yet.")
         else:
-            rows = [{"Code": m.get("doc_code","—"), "Title": m.get("title",""),
-                     "Type": m.get("doc_type","—"),
-                     "Source": "Internal" if m.get("is_internal") else "External",
-                     "Location": m.get("location","—") or "—"} for m in masters]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             st.caption(f"{len(masters)} document(s) in master list")
+
+            hdr_cols = st.columns([1.5, 2.6, 1.1, 1, 1.3, 1.3, 0.6, 0.6, 0.6])
+            for col, label in zip(hdr_cols,
+                                   ["Code","Title","Category","Source","Reviewed Date","Next Review","","",""]):
+                col.markdown(f"**{label}**")
+            st.markdown("<hr style='margin:2px 0'>", unsafe_allow_html=True)
+
+            for m in masters:
+                mid = m["id"]
+                is_obsolete = (m.get("status") == "Obsolete")
+                row = st.columns([1.5, 2.6, 1.1, 1, 1.3, 1.3, 0.6, 0.6, 0.6])
+
+                code_txt  = m.get("doc_code","—")
+                title_txt = m.get("title","")
+                if is_obsolete:
+                    strike = "color:#999;text-decoration:line-through"
+                    row[0].markdown(f"<span style='{strike}'>{code_txt}</span>", unsafe_allow_html=True)
+                    row[1].markdown(f"<span style='{strike}'>{title_txt}</span>", unsafe_allow_html=True)
+                else:
+                    row[0].markdown(code_txt)
+                    row[1].markdown(title_txt)
+                row[2].markdown(m.get("category") or m.get("doc_type","—"))
+                row[3].markdown("Internal" if m.get("is_internal") else "External")
+
+                rd_raw = m.get("reviewed_date")
+                try:
+                    rd_val = date.fromisoformat(str(rd_raw)[:10]) if rd_raw else today
+                except Exception:
+                    rd_val = today
+                new_reviewed = row[4].date_input("Reviewed", value=rd_val,
+                                                  key=f"revdate_{mid}", label_visibility="collapsed")
+
+                if is_obsolete:
+                    row[5].markdown("⬛ *Obsolete — excluded from reviews*")
+                else:
+                    next_review = _next_review(m)
+                    if next_review is None:
+                        row[5].markdown("⚪ Never reviewed")
+                    elif next_review <= today:
+                        row[5].markdown(f"🔴 {next_review.isoformat()} (overdue)")
+                    elif (next_review - today).days <= 30:
+                        row[5].markdown(f"🟡 {next_review.isoformat()}")
+                    else:
+                        row[5].markdown(f"🟢 {next_review.isoformat()}")
+
+                if row[6].button("💾", key=f"save_{mid}", help="Save reviewed date"):
+                    try:
+                        sb.table("master_documents").update(
+                            {"reviewed_date": new_reviewed.isoformat()}
+                        ).eq("id", mid).execute()
+                        st.success(f"Reviewed date updated for {m.get('doc_code')}.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error saving: {e}")
+
+                if is_obsolete:
+                    if row[7].button("♻️", key=f"reactivate_{mid}", help="Reactivate this document"):
+                        try:
+                            sb.table("master_documents").update({"status": "Active"}).eq("id", mid).execute()
+                            st.success(f"{code_txt} reactivated.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error reactivating: {e}")
+                else:
+                    if row[7].button("🚫", key=f"obsolete_{mid}", help="Mark as obsolete (kept in the list, excluded from reviews)"):
+                        try:
+                            sb.table("master_documents").update({"status": "Obsolete"}).eq("id", mid).execute()
+                            st.success(f"{code_txt} marked obsolete.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+
+                if row[8].button("🗑️", key=f"del_{mid}", help="Permanently delete from master list"):
+                    st.session_state[f"confirm_del_{mid}"] = True
+
+                # Compact detail line: revision, approver, status, and a file link if uploaded
+                detail_bits = []
+                if m.get("revision_label"):
+                    detail_bits.append(f"Rev {m['revision_label']}")
+                if m.get("revision_date"):
+                    detail_bits.append(f"revised {m['revision_date']}")
+                if m.get("issue_date"):
+                    detail_bits.append(f"issued {m['issue_date']}")
+                if m.get("approved_by"):
+                    detail_bits.append(f"approved by {m['approved_by']}")
+                if m.get("status") and m.get("status") != "Active":
+                    detail_bits.append(f"status: {m['status']}")
+                detail_line = " • ".join(detail_bits)
+                if detail_line or m.get("file_url"):
+                    dcol1, dcol2 = st.columns([5,1])
+                    if detail_line:
+                        dcol1.caption(detail_line)
+                    if m.get("file_url"):
+                        dcol2.markdown(f"[📄 View file]({m['file_url']})")
+
+                if st.session_state.get(f"confirm_del_{mid}"):
+                    st.warning(
+                        f"Delete **{m.get('doc_code')} — {m.get('title')}** from the master list? "
+                        "This cannot be undone. Any document that references this code will keep "
+                        "the reference, but it will no longer resolve to a master entry."
+                    )
+                    cc1, cc2 = st.columns([1,1])
+                    with cc1:
+                        if st.button("Yes, delete", key=f"confirm_yes_{mid}"):
+                            try:
+                                sb.table("master_documents").delete().eq("id", mid).execute()
+                                st.session_state.pop(f"confirm_del_{mid}", None)
+                                st.success("Deleted.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error deleting: {e}")
+                    with cc2:
+                        if st.button("Cancel", key=f"confirm_no_{mid}"):
+                            st.session_state.pop(f"confirm_del_{mid}", None)
+                            st.rerun()
+                st.markdown("<hr style='margin:4px 0;opacity:0.3'>", unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
