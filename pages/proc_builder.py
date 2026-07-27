@@ -896,13 +896,15 @@ def generate_pdf(doc):
         story.append(ap_t)
         story.append(Spacer(1, 0.4*cm))
 
-    # Date of adoption
-    adopt_t = Table(
-        [[Paragraph("Date of Adoption", bold_s), Paragraph(adoption, centered)]],
-        colWidths=[5*cm, 5*cm])
+    # Date of adoption + last reviewed date
+    reviewed_date_val = doc.get("reviewed_date")
+    adopt_rows = [[Paragraph("Date of Adoption", bold_s), Paragraph(adoption, centered)]]
+    if reviewed_date_val:
+        adopt_rows.append([Paragraph("Last Reviewed", bold_s), Paragraph(str(reviewed_date_val), centered)])
+    adopt_t = Table(adopt_rows, colWidths=[5*cm, 5*cm])
     adopt_t.setStyle(TableStyle([
         ("GRID",       (0,0),(-1,-1), 0.5, colors.HexColor("#999999")),
-        ("BACKGROUND", (0,0),(0,0),   LIGHT_BLUE),
+        ("BACKGROUND", (0,0),(0,-1),  LIGHT_BLUE),
         ("FONTSIZE",   (0,0),(-1,-1), 8),
         ("VALIGN",     (0,0),(-1,-1), "MIDDLE"),
         ("ALIGN",      (1,0),(-1,-1), "CENTER"),
