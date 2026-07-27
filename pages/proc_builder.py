@@ -6,6 +6,7 @@ import requests
 import io
 import math
 import re
+import json
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import cm, mm
@@ -1508,7 +1509,11 @@ def show():
                     up_rev_date   = st.date_input("Revision Date", value=None)
                     up_approved   = st.text_input("Approved By", placeholder="e.g. Executive Director / ED")
 
-                up_reviewed_date = st.date_input("Reviewed Date (for the yearly review cycle)", value=None)
+                up_reviewed_date = st.date_input(
+                    "Reviewed Date (auto-set to today since uploading is how you record a review — "
+                    "change this only if the document's real review date is different)",
+                    value=date.today()
+                )
                 up_status  = st.selectbox("Status", ["Active","Draft","Obsolete","Superseded"])
                 up_file    = st.file_uploader("File", type=["pdf","docx","doc","xlsx","xls","png","jpg","jpeg"])
 
@@ -1882,30 +1887,171 @@ def _render_document(sb, doc, uid):
 
     if can_write():
         st.markdown("---")
-        with st.expander("🔄 Create New Revision"):
-            with st.form(f"revise_{doc['id']}", clear_on_submit=True):
-                rev_desc  = st.text_area("What changed in this revision?", height=80)
-                submitted = st.form_submit_button("Create Revision")
-            if submitted:
-                new_rev = rev + 1
+        st.markdown("### Document Maintenance")
+
+        # ── Reviewed-date status + Mark as Reviewed (no content change) ──
+        reviewed_date = doc.get("reviewed_date")
+        status_col, btn_col = st.columns([3, 1])
+        with status_col:
+            if reviewed_date:
                 try:
-                    snapshot = {k: v for k, v in doc.items() if k != "_revisions"}
-                    sb.table("proc_revisions").insert({
-                        "doc_id":       doc["id"],
-                        "revision":     new_rev,
-                        "revised_date": date.today().isoformat(),
-                        "status":       revision_label(new_rev),
-                        "description":  rev_desc,
-                        "revised_by":   uid,
-                        "snapshot":     snapshot,
-                    }).execute()
-                    sb.table("proc_documents").update({
-                        "revision": new_rev, "updated_by": uid,
-                    }).eq("id", doc["id"]).execute()
-                    st.success(f"✅ Revision {new_rev:02d} created.")
+                    rd = date.fromisoformat(str(reviewed_date)[:10])
+                    next_review = rd.replace(year=rd.year + 1)
+                    today = date.today()
+                    if next_review <= today:
+                        st.caption(f"🔴 Last reviewed {reviewed_date} — overdue (was due {next_review.isoformat()})")
+                    elif (next_review - today).days <= 30:
+                        st.caption(f"🟡 Last reviewed {reviewed_date} — next review due {next_review.isoformat()}")
+                    else:
+                        st.caption(f"🟢 Last reviewed {reviewed_date} — next review due {next_review.isoformat()}")
+                except Exception:
+                    st.caption(f"Last reviewed {reviewed_date}")
+            else:
+                st.caption("⚪ Never reviewed")
+        with btn_col:
+            if st.button("✅ Mark as Reviewed", key=f"reviewed_{doc['id']}",
+                         help="Confirms this document is still accurate as-is — no content changes. "
+                              "Updates the review date shown to auditors without creating a new revision."):
+                try:
+                    today_iso = date.today().isoformat()
+                    sb.table("proc_documents").update({"reviewed_date": today_iso}).eq("id", doc["id"]).execute()
+                    sb.table("master_documents").update({"reviewed_date": today_iso}).eq("doc_code", doc_code).execute()
+                    st.success(f"Marked as reviewed on {today_iso}.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error: {e}")
+
+        # ── Edit Document (actual content changes, logged as a new revision) ──
+        with st.expander("✏️ Edit Document"):
+            st.caption(
+                "Changing anything here and saving creates a new revision, logs what changed, "
+                "and marks the document as reviewed today. Procedure Steps are edited as JSON — "
+                "ask Claude to help generate the updated structure if you're restructuring the "
+                "flowchart (branches, side-branches, etc.), then paste it in below."
+            )
+            with st.form(f"edit_{doc['id']}"):
+                e_title      = st.text_input("Title", value=doc.get("title", ""))
+                e_dept_label = st.text_input("Department Label", value=doc.get("dept_label", ""))
+                e_purpose    = st.text_area("Purpose", value=doc.get("purpose", ""), height=100)
+                e_policy     = st.text_area("Policy (one per line)",
+                                             value="\n".join(doc.get("policy") or []), height=80)
+                e_scope      = st.text_area("Scope (one per line)",
+                                             value="\n".join(doc.get("scope") or []), height=80)
+                e_resp       = st.text_area("Responsibilities (one per line)",
+                                             value="\n".join(doc.get("responsibilities") or []), height=120)
+
+                abbr_lines = "\n".join(f"{a.get('term','')} = {a.get('definition','')}"
+                                        for a in (doc.get("abbreviations") or []))
+                e_abbr = st.text_area("Abbreviations (Term = Definition, one per line)",
+                                       value=abbr_lines, height=100)
+
+                steps_json = json.dumps(doc.get("procedure_steps") or [], indent=2, ensure_ascii=False)
+                e_steps = st.text_area("Procedure Steps (JSON)", value=steps_json, height=300)
+
+                related_lines = "\n".join(f"{r.get('code','')} | {r.get('title','')}"
+                                           for r in (doc.get("related_docs") or []))
+                e_related = st.text_area("Related Documents (code | title, one per line)",
+                                          value=related_lines, height=80)
+
+                resulting_lines = "\n".join(f"{r.get('code','')} | {r.get('title','')}"
+                                             for r in (doc.get("resulting_records") or []))
+                e_resulting = st.text_area("Resulting Records (code | title, one per line)",
+                                            value=resulting_lines, height=80)
+
+                ext_lines = "\n".join(f"{r.get('code','')} | {r.get('title','')}"
+                                       for r in (doc.get("ext_references") or []))
+                e_ext = st.text_area("External References (code | title, one per line)",
+                                      value=ext_lines, height=80)
+
+                approvals_lines = "\n".join(f"{a.get('department','')} | {a.get('function','')}"
+                                             for a in (doc.get("approvals") or []))
+                e_approvals = st.text_area("Approvals (department | function, one per line)",
+                                            value=approvals_lines, height=80)
+
+                e_rev_desc = st.text_area("What changed in this edit? *", height=80,
+                                           help="Required — logged in the revision history.")
+
+                submitted = st.form_submit_button("Save Changes")
+
+            if submitted:
+                if not e_rev_desc.strip():
+                    st.error("Please describe what changed before saving.")
+                else:
+                    try:
+                        steps_parsed = json.loads(e_steps)
+                    except Exception as ex:
+                        st.error(f"Procedure Steps JSON is invalid, nothing was saved: {ex}")
+                        steps_parsed = None
+
+                    if steps_parsed is not None:
+                        def _parse_lines(text):
+                            return [l.strip() for l in text.split("\n") if l.strip()]
+
+                        def _parse_pairs(text):
+                            out = []
+                            for l in text.split("\n"):
+                                l = l.strip()
+                                if l and "|" in l:
+                                    code, _, ttl = l.partition("|")
+                                    out.append({"code": code.strip(), "title": ttl.strip()})
+                            return out
+
+                        def _parse_abbrevs(text):
+                            out = []
+                            for l in text.split("\n"):
+                                l = l.strip()
+                                if l and "=" in l:
+                                    term, _, defn = l.partition("=")
+                                    out.append({"term": term.strip(), "definition": defn.strip()})
+                            return out
+
+                        def _parse_approvals(text):
+                            out = []
+                            for l in text.split("\n"):
+                                l = l.strip()
+                                if l and "|" in l:
+                                    dept, _, func = l.partition("|")
+                                    out.append({"department": dept.strip(), "function": func.strip()})
+                            return out
+
+                        new_rev   = rev + 1
+                        today_iso = date.today().isoformat()
+                        payload = {
+                            "title":             e_title,
+                            "dept_label":        e_dept_label,
+                            "purpose":           e_purpose,
+                            "policy":            _parse_lines(e_policy),
+                            "scope":             _parse_lines(e_scope),
+                            "responsibilities":  _parse_lines(e_resp),
+                            "abbreviations":     _parse_abbrevs(e_abbr),
+                            "procedure_steps":   steps_parsed,
+                            "related_docs":      _parse_pairs(e_related),
+                            "resulting_records": _parse_pairs(e_resulting),
+                            "ext_references":    _parse_pairs(e_ext),
+                            "approvals":         _parse_approvals(e_approvals),
+                            "revision":          new_rev,
+                            "reviewed_date":     today_iso,
+                            "updated_by":        uid,
+                        }
+                        try:
+                            snapshot = {k: v for k, v in doc.items() if k != "_revisions"}
+                            sb.table("proc_revisions").insert({
+                                "doc_id":       doc["id"],
+                                "revision":     new_rev,
+                                "revised_date": today_iso,
+                                "status":       revision_label(new_rev),
+                                "description":  e_rev_desc,
+                                "revised_by":   uid,
+                                "snapshot":     snapshot,
+                            }).execute()
+                            sb.table("proc_documents").update(payload).eq("id", doc["id"]).execute()
+                            sb.table("master_documents").update({
+                                "title": e_title, "reviewed_date": today_iso,
+                            }).eq("doc_code", doc_code).execute()
+                            st.success(f"✅ Saved. Revision {new_rev:02d} created and reviewed date updated.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error saving: {e}")
 
 
 # ─────────────────────────────────────────────
