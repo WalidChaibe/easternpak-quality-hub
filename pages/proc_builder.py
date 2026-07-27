@@ -540,6 +540,158 @@ class SwimlaneFlowchart(Flowable):
                     c.setFillColor(self.ARROW_COLOR)
                     c.drawCentredString(lx + label_w/2, mid_y - 0.09*cm, conn)
 
+
+def _should_use_lane_grid(steps):
+    """Cross-functional swimlanes read far better than a single vertical
+    chain when a document has a small, consistently-reused set of roles
+    and no branch/merge points to represent. Docs with branch_split or
+    input_row keep the single-column renderer since lane-grid can't
+    express branching/merging cleanly."""
+    if not steps:
+        return False
+    if any(s.get("type") in ("branch_split", "input_row") for s in steps):
+        return False
+    lanes = []
+    for s in steps:
+        lane = (s.get("swimlane") or "").strip()
+        if lane and lane not in lanes:
+            lanes.append(lane)
+    return 2 <= len(lanes) <= 6
+
+
+class LaneGridFlowchart(Flowable):
+    """Cross-functional swimlane chart: one column per role, steps flow
+    top-to-bottom in strict sequence, with connectors routed orthogonally
+    between columns whenever the owning role changes."""
+
+    ROW_V_GAP    = 0.5*cm
+    ROW_MIN_H    = 1.0*cm
+    BOX_PAD_X    = 0.22*cm
+    LANE_HDR_H   = 0.9*cm
+    LANE_GAP     = 0.12*cm
+    TOP_PAD      = 0.3*cm
+    BOTTOM_PAD   = 0.3*cm
+    FONT         = "Helvetica"
+    FONT_B       = "Helvetica-Bold"
+    FONT_SZ      = 7.6
+    LANE_FONT_SZ = 7.8
+    LINE_H       = FONT_SZ + 2.2
+
+    LANE_BANDS   = [colors.HexColor("#EAF3FB"), colors.HexColor("#F4F4F4")]
+    BOX_FILL     = colors.white
+    BOX_BORDER   = NAPCO_BLUE
+    SHADOW_COLOR = colors.HexColor("#DADADA")
+    ARROW_COLOR  = colors.HexColor("#4A4A4A")
+
+    def __init__(self, steps, available_width, lane_order=None):
+        super().__init__()
+        self.steps = steps
+        self.width = available_width
+
+        if lane_order:
+            self.lanes = list(lane_order)
+        else:
+            self.lanes = []
+            for s in steps:
+                lane = (s.get("swimlane") or "General").strip() or "General"
+                if lane not in self.lanes:
+                    self.lanes.append(lane)
+
+        n = max(1, len(self.lanes))
+        self.lane_w = (self.width - (n - 1) * self.LANE_GAP) / n
+        self.lane_x = [i * (self.lane_w + self.LANE_GAP) for i in range(n)]
+        self.lane_index = {lane: i for i, lane in enumerate(self.lanes)}
+
+        box_w = self.lane_w - 2 * self.BOX_PAD_X
+        self._prepared = []
+        for s in steps:
+            title = s.get("title", "")
+            lines = _wrap_words(title, self.FONT, self.FONT_SZ, box_w - 10)
+            text_h = len(lines) * self.LINE_H
+            box_h = max(self.ROW_MIN_H, text_h + 0.3*cm)
+            lane = (s.get("swimlane") or "General").strip() or "General"
+            self._prepared.append({"lines": lines, "box_h": box_h, "lane": lane})
+
+        self._row_heights = [p["box_h"] + self.ROW_V_GAP for p in self._prepared]
+        self.total_h = self.TOP_PAD + self.LANE_HDR_H + sum(self._row_heights) + self.BOTTOM_PAD
+        self.height = self.total_h
+
+    def _row_geom(self, idx):
+        y_from_top = self.TOP_PAD + self.LANE_HDR_H + sum(self._row_heights[:idx])
+        box_h = self._prepared[idx]["box_h"]
+        y_from_top += box_h / 2
+        return self.total_h - y_from_top, box_h
+
+    def draw(self):
+        c = self.canv
+        c.setLineCap(1)
+        c.setLineJoin(1)
+
+        body_h = self.total_h - self.LANE_HDR_H - self.TOP_PAD
+        for i, lane in enumerate(self.lanes):
+            lx = self.lane_x[i]
+            c.setFillColor(self.LANE_BANDS[i % len(self.LANE_BANDS)])
+            c.rect(lx, self.BOTTOM_PAD, self.lane_w, body_h, fill=1, stroke=0)
+
+            c.setFillColor(NAPCO_BLUE)
+            c.rect(lx, self.total_h - self.LANE_HDR_H, self.lane_w, self.LANE_HDR_H, fill=1, stroke=0)
+            c.setFillColor(colors.white)
+            c.setFont(self.FONT_B, self.LANE_FONT_SZ)
+            lane_lines = _wrap_words(lane.upper(), self.FONT_B, self.LANE_FONT_SZ, self.lane_w - 8)
+            lh = self.LANE_FONT_SZ + 2
+            ly = self.total_h - self.LANE_HDR_H/2 + (len(lane_lines) - 1) * lh / 2
+            for li, ln in enumerate(lane_lines):
+                c.drawCentredString(lx + self.lane_w/2, ly - li*lh, ln)
+
+        c.setStrokeColor(colors.HexColor("#DDDDDD"))
+        c.setLineWidth(0.6)
+        c.roundRect(1, 1, self.width - 2, self.total_h - 2, radius=4, fill=0, stroke=1)
+
+        for idx, step in enumerate(self.steps):
+            p = self._prepared[idx]
+            lane_i = self.lane_index[p["lane"]]
+            cx = self.lane_x[lane_i] + self.lane_w / 2
+            cy, bh = self._row_geom(idx)
+            bw = self.lane_w - 2 * self.BOX_PAD_X
+
+            c.setFillColor(self.SHADOW_COLOR)
+            c.roundRect(cx - bw/2 + 0.05*cm, cy - bh/2 - 0.05*cm, bw, bh, radius=5, fill=1, stroke=0)
+            c.setFillColor(self.BOX_FILL)
+            c.setStrokeColor(self.BOX_BORDER)
+            c.setLineWidth(1.1)
+            c.roundRect(cx - bw/2, cy - bh/2, bw, bh, radius=5, fill=1, stroke=1)
+
+            c.setFillColor(DARK_TEXT)
+            c.setFont(self.FONT, self.FONT_SZ)
+            lines = p["lines"]
+            start_y = cy + (len(lines) - 1) * self.LINE_H / 2
+            for li, ln in enumerate(lines):
+                c.drawCentredString(cx, start_y - li * self.LINE_H, ln)
+
+            if idx < len(self.steps) - 1:
+                next_p = self._prepared[idx + 1]
+                next_lane_i = self.lane_index[next_p["lane"]]
+                next_cx = self.lane_x[next_lane_i] + self.lane_w / 2
+                next_cy, next_bh = self._row_geom(idx + 1)
+                box_bottom = cy - bh / 2
+                next_top = next_cy + next_bh / 2
+
+                c.setStrokeColor(self.ARROW_COLOR)
+                c.setFillColor(self.ARROW_COLOR)
+                c.setLineWidth(1.1)
+
+                if abs(next_cx - cx) < 1:
+                    y_end = next_top + 0.06*cm
+                    c.line(cx, box_bottom, cx, y_end)
+                    _draw_arrowhead(c, cx, y_end, self.ARROW_COLOR)
+                else:
+                    mid_y = (box_bottom + next_top) / 2
+                    c.line(cx, box_bottom, cx, mid_y)
+                    c.line(cx, mid_y, next_cx, mid_y)
+                    y_end = next_top + 0.06*cm
+                    c.line(next_cx, mid_y, next_cx, y_end)
+                    _draw_arrowhead(c, next_cx, y_end, self.ARROW_COLOR)
+
 # ─────────────────────────────────────────────
 # PDF GENERATION
 # ─────────────────────────────────────────────
@@ -927,19 +1079,36 @@ def generate_pdf(doc):
             story.append(Paragraph(f"→ In parallel: {sb_title}", numbered))
         story.append(Spacer(1, 0.15*cm))
 
-    # Single-column process flowchart — paginated so it never exceeds one frame's height.
-    # Box heights are now dynamic (based on wrapped title length), so chunks are built
-    # greedily by actually measuring each candidate chart's computed height.
+    # Process flowchart — paginated so it never exceeds one frame's height.
+    # Box heights are dynamic (based on wrapped title length), so chunks are
+    # built greedily by actually measuring each candidate chart's height.
+    # A document with a small, consistently-reused set of roles and no
+    # branch/merge points renders as a cross-functional swimlane grid
+    # (much more readable); anything with branch_split/input_row keeps the
+    # single-column renderer since lane-grid can't express branching.
     if steps:
         story.append(Spacer(1, 0.4*cm))
         story.append(Paragraph("Process Flowchart", h2s))
         story.append(Spacer(1, 0.2*cm))
 
+        use_lane_grid = _should_use_lane_grid(steps)
+        if use_lane_grid:
+            ChartClass = LaneGridFlowchart
+            lane_order = []
+            for s in steps:
+                lane = (s.get("swimlane") or "General").strip() or "General"
+                if lane not in lane_order:
+                    lane_order.append(lane)
+            chart_kwargs = {"lane_order": lane_order}
+        else:
+            ChartClass = SwimlaneFlowchart
+            chart_kwargs = {}
+
         avail_h = (PAGE_H - TOP_M - BOT_M) - 1*cm  # safety margin
         chunks, current = [], []
         for step in steps:
             trial = current + [step]
-            if SwimlaneFlowchart(trial, avail_w).total_h > avail_h and current:
+            if ChartClass(trial, avail_w, **chart_kwargs).total_h > avail_h and current:
                 chunks.append(current)
                 current = [step]
             else:
@@ -948,7 +1117,7 @@ def generate_pdf(doc):
             chunks.append(current)
 
         for i, chunk in enumerate(chunks):
-            chart = SwimlaneFlowchart(chunk, avail_w)
+            chart = ChartClass(chunk, avail_w, **chart_kwargs)
             story.append(chart)
             if i < len(chunks) - 1:
                 story.append(PageBreak())
