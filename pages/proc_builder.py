@@ -7,6 +7,13 @@ import io
 import math
 import re
 import json
+import subprocess
+import tempfile
+import os
+from docx import Document
+from docx.shared import Pt, Cm, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import cm, mm
@@ -159,20 +166,38 @@ def _draw_arrowhead_right(canvas, x, y, color):
     canvas.drawPath(p, fill=1, stroke=0)
 
 def _wrap_words(text, font, size, max_width):
-    """Greedy word-wrap: returns a list of lines that each fit within max_width."""
-    words = (text or "").split()
-    if not words:
+    """Greedy word-wrap: returns a list of lines that each fit within max_width.
+    A single space-delimited "word" that's itself too wide (e.g. a long
+    slash-separated term like Tools/Equipment/Accessories) is additionally
+    split on '/' as a fallback break point, so it doesn't overflow its box.
+    Each (piece, glue) pair tracks whether the piece joins the previous
+    piece with no space (glue='') or a normal space (glue=' ')."""
+    raw_words = (text or "").split()
+    if not raw_words:
         return [""]
-    lines, cur = [], []
-    for w in words:
-        test = " ".join(cur + [w])
-        if stringWidth(test, font, size) <= max_width or not cur:
-            cur.append(w)
+
+    pieces = []  # list of (text, glue_before)
+    for w in raw_words:
+        if stringWidth(w, font, size) > max_width and "/" in w:
+            sub = w.split("/")
+            for i, p in enumerate(sub):
+                token = p + ("/" if i < len(sub) - 1 else "")
+                pieces.append((token, "" if i > 0 else " "))
         else:
-            lines.append(" ".join(cur))
-            cur = [w]
-    if cur:
-        lines.append(" ".join(cur))
+            pieces.append((w, " "))
+
+    lines, cur_text, cur_pieces = [], "", []
+    for token, glue in pieces:
+        candidate = cur_text + glue + token if cur_pieces else token
+        if stringWidth(candidate, font, size) <= max_width or not cur_pieces:
+            cur_text = candidate
+            cur_pieces.append(token)
+        else:
+            lines.append(cur_text)
+            cur_text = token
+            cur_pieces = [token]
+    if cur_pieces:
+        lines.append(cur_text)
     return lines
 
 class SwimlaneFlowchart(Flowable):
@@ -1161,6 +1186,415 @@ def generate_pdf(doc):
 
 
 # ─────────────────────────────────────────────
+# WORD (DOCX) GENERATION — mirrors generate_pdf's structure and content,
+# including the same flowchart visuals, rasterized to images.
+# ─────────────────────────────────────────────
+def _flowable_to_png_bytes(flowable, width_pt, height_pt, dpi=150):
+    """Renders a ReportLab Flowable (e.g. SwimlaneFlowchart/LaneGridFlowchart)
+    to PNG bytes by drawing it onto a single-page PDF sized exactly to its
+    own dimensions, then rasterizing with pdftoppm (poppler-utils)."""
+    from reportlab.pdfgen import canvas as rl_canvas
+    buf = io.BytesIO()
+    c = rl_canvas.Canvas(buf, pagesize=(width_pt, height_pt))
+    flowable.drawOn(c, 0, 0)
+    c.showPage()
+    c.save()
+    pdf_bytes = buf.getvalue()
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+        tf.write(pdf_bytes)
+        tf_path = tf.name
+    out_prefix = tf_path[:-4]
+    try:
+        subprocess.run(["pdftoppm", "-png", "-r", str(dpi), tf_path, out_prefix],
+                        check=True, capture_output=True)
+        png_path = out_prefix + "-1.png"
+        with open(png_path, "rb") as f:
+            png_bytes = f.read()
+    finally:
+        for p in (tf_path, out_prefix + "-1.png"):
+            if os.path.exists(p):
+                os.remove(p)
+    return png_bytes
+
+
+def _docx_set_cell_background(cell, hex_color):
+    """python-docx has no direct API for cell shading — patches the cell's
+    underlying XML directly."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:fill"), hex_color)
+    cell._tc.get_or_add_tcPr().append(shd)
+
+
+def _docx_add_footer_disclaimer(document):
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    section = document.sections[0]
+    footer = section.footer
+    p1 = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+    p1.text = ("THE INFORMATION CONTAINED HEREIN IS PROPRIETARY TO NAPCO NATIONAL AND IT SHALL NOT BE "
+               "USED, REPRODUCED OR DISCLOSED TO OTHERS EXCEPT AS SPECIFICALLY PERMITTED IN WRITING BY "
+               "THE PROPRIETOR.")
+    p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in p1.runs:
+        run.font.size = Pt(6.5)
+        run.font.italic = True
+        run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+
+    p2 = footer.add_paragraph('"UNCONTROLLED IF PRINTED"')
+    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in p2.runs:
+        run.font.size = Pt(7)
+        run.font.bold = True
+        run.font.italic = True
+
+
+def _docx_add_header_table(document, doc_code, title_txt, adoption, issue_date, rev_date):
+    """Adds the running header (logo + control-number table) to the section."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    section = document.sections[0]
+    header = section.header
+
+    try:
+        p_logo = header.paragraphs[0]
+        run = p_logo.add_run()
+        run.add_picture(LOGO_PATH, height=Cm(1.0))
+    except Exception:
+        pass
+
+    tbl = header.add_table(rows=2, cols=6, width=Cm(17))
+    tbl.autofit = False
+    widths = [Cm(2.2), Cm(7.6), Cm(2.8), Cm(2.2), Cm(2.2), Cm(2.0)]
+    hdr_cells = tbl.rows[0].cells
+    hdr_cells[0].merge(hdr_cells[0])
+    row1 = ["TITLE", title_txt.upper(), "", "", "", ""]
+    # Row 1: TITLE | value (merged) | (blank) | (blank) | NBR OF PAGES-ish | (blank)
+    r1 = tbl.rows[0].cells
+    r1[0].text = "TITLE"
+    r1[1].merge(r1[4])
+    r1[1].text = title_txt.upper()
+    r1[5].text = "QUALITY PROCEDURE"
+
+    r2 = tbl.rows[1].cells
+    r2[0].text = "CONTROL NBR."
+    r2[1].text = str(doc_code)
+    r2[2].text = "1ST ISSUE DATE"
+    r2[3].text = str(issue_date)
+    r2[4].text = "REVISION DATE"
+    r2[5].text = str(rev_date)
+
+    for ci, w in enumerate(widths):
+        for row in tbl.rows:
+            row.cells[ci].width = w
+
+    for row in tbl.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for run in p.runs:
+                    run.font.size = Pt(7)
+            _docx_set_cell_background(cell, "F2F2F2")
+    for cell in [r1[0], r2[0], r2[2], r2[4]]:
+        for p in cell.paragraphs:
+            for run in p.runs:
+                run.font.bold = True
+
+
+def generate_docx(doc):
+    """Generates a Word (.docx) version of the document, visually matching
+    generate_pdf — same sections, same flowchart images (rasterized from the
+    identical drawing code used for the PDF), same tables."""
+    NAPCO_BLUE_HEX = "0D68A3"
+    LIGHT_BLUE_HEX = "D5E8F0"
+
+    document = Document()
+    section = document.sections[0]
+    section.page_width  = Cm(21.0)
+    section.page_height  = Cm(29.7)
+    section.left_margin  = Cm(2.0)
+    section.right_margin = Cm(2.0)
+    section.top_margin   = Cm(2.6)
+    section.bottom_margin = Cm(1.8)
+
+    doc_code   = doc.get("doc_code", "-")
+    title_txt  = doc.get("title", "")
+    dept_label = doc.get("dept_label") or doc.get("dept", "")
+    adoption   = doc.get("date_of_adoption", "-")
+    revisions  = doc.get("_revisions") or []
+    issue_date = revisions[0]["revised_date"] if revisions else adoption
+    rev_date   = revisions[-1]["revised_date"] if revisions else adoption
+
+    _docx_add_header_table(document, doc_code, title_txt, adoption, issue_date, rev_date)
+    _docx_add_footer_disclaimer(document)
+
+    avail_w_pt = (21.0 - 4.0) * cm  # content width in points, matching PDF's avail_w
+
+    # ── Cover page ──────────────────────────────
+    for _ in range(3):
+        document.add_paragraph()
+    try:
+        p_logo = document.add_paragraph()
+        p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_logo.add_run().add_picture(LOGO_PATH, height=Cm(2.2))
+    except Exception:
+        pass
+
+    p_dept = document.add_paragraph()
+    p_dept.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p_dept.add_run(dept_label.upper())
+    r.font.size = Pt(13)
+    r.font.bold = True
+
+    p_title = document.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p_title.add_run(title_txt.upper())
+    r.font.size = Pt(22)
+    r.font.bold = True
+    document.add_paragraph()
+
+    approvals = doc.get("approvals") or []
+    if approvals:
+        n = len(approvals)
+        ap = document.add_table(rows=5, cols=n + 1)
+        ap.alignment = WD_TABLE_ALIGNMENT.CENTER
+        labels = ["APPROVED BY", "Department", "Function", "Signature", "Date"]
+        for ri, lbl in enumerate(labels):
+            ap.rows[ri].cells[0].text = lbl
+            for c in ap.rows[ri].cells:
+                for p in c.paragraphs:
+                    for run in p.runs:
+                        run.font.bold = (ri == 0 or True) if False else run.font.bold
+        for ci, a in enumerate(approvals, start=1):
+            ap.rows[1].cells[ci].text = a.get("department", "")
+            ap.rows[2].cells[ci].text = a.get("function", "")
+        for ri in range(5):
+            _docx_set_cell_background(ap.rows[ri].cells[0], LIGHT_BLUE_HEX)
+        _docx_set_cell_background(ap.rows[0].cells[0], NAPCO_BLUE_HEX)
+        for c in ap.rows[0].cells:
+            _docx_set_cell_background(c, NAPCO_BLUE_HEX)
+            for p in c.paragraphs:
+                for run in p.runs:
+                    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                    run.font.bold = True
+        for row in ap.rows:
+            for c in row.cells:
+                for p in c.paragraphs:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in p.runs:
+                        run.font.size = Pt(8)
+        document.add_paragraph()
+
+    adopt_rows = 2 if doc.get("reviewed_date") else 1
+    adopt_t = document.add_table(rows=adopt_rows, cols=2)
+    adopt_t.alignment = WD_TABLE_ALIGNMENT.CENTER
+    adopt_t.rows[0].cells[0].text = "Date of Adoption"
+    adopt_t.rows[0].cells[1].text = str(adoption)
+    if doc.get("reviewed_date"):
+        adopt_t.rows[1].cells[0].text = "Last Reviewed"
+        adopt_t.rows[1].cells[1].text = str(doc.get("reviewed_date"))
+    for row in adopt_t.rows:
+        _docx_set_cell_background(row.cells[0], LIGHT_BLUE_HEX)
+        for c in row.cells:
+            for p in c.paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for run in p.runs:
+                    run.font.size = Pt(9)
+    document.add_paragraph()
+
+    h = document.add_heading("REVISION HISTORY", level=2)
+    if revisions:
+        rt = document.add_table(rows=1, cols=4)
+        rt.alignment = WD_TABLE_ALIGNMENT.CENTER
+        hdr = rt.rows[0].cells
+        for i, lbl in enumerate(["Revision", "Date", "Status", "Description"]):
+            hdr[i].text = lbl
+            _docx_set_cell_background(hdr[i], NAPCO_BLUE_HEX)
+            for p in hdr[i].paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for run in p.runs:
+                    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                    run.font.bold = True
+                    run.font.size = Pt(9)
+        for rv in revisions:
+            row = rt.add_row().cells
+            row[0].text = f"{rv.get('revision', 0):02d}"
+            row[1].text = str(rv.get("revised_date", ""))
+            row[2].text = str(rv.get("status", ""))
+            row[3].text = str(rv.get("description", ""))
+            for c in row:
+                for p in c.paragraphs:
+                    for run in p.runs:
+                        run.font.size = Pt(8.5)
+
+    document.add_page_break()
+
+    # ── Table of Contents (static, matches PDF layout) ──────────────
+    document.add_heading("Table of Contents", level=1)
+    toc_entries = [
+        ("1.0", "Introduction", False), ("1.1", "Purpose", True), ("1.2", "Policy", True),
+        ("1.3", "Scope of Application", True), ("1.4", "Authorities & Responsibilities", True),
+        ("2.0", "Abbreviations and Definitions", False),
+        ("3.0", "Procedure (Narrative or Flowchart)", False),
+        ("4.0", "Associated Documentation", False), ("4.1", "Related Documents", True),
+        ("4.2", "Resulting Records", True), ("4.3", "Internal / External References", True),
+    ]
+    for num, lbl, is_sub in toc_entries:
+        p = document.add_paragraph()
+        if is_sub:
+            p.paragraph_format.left_indent = Cm(0.8)
+        run = p.add_run(f"{num}\t{lbl}")
+        run.font.bold = not is_sub
+        run.font.size = Pt(10 if not is_sub else 9.5)
+    document.add_page_break()
+
+    # ── 1.0 Introduction ──────────────────────────────
+    document.add_heading("1.0 Introduction", level=1)
+    document.add_heading("1.1 Purpose", level=2)
+    document.add_paragraph(doc.get("purpose", ""))
+
+    policy = doc.get("policy") or []
+    if policy:
+        document.add_heading("1.2 Policy", level=2)
+        for p_item in policy:
+            document.add_paragraph(p_item, style="List Bullet")
+
+    scope = doc.get("scope") or []
+    if scope:
+        document.add_heading("1.3 Scope of Application", level=2)
+        for s_item in scope:
+            document.add_paragraph(s_item, style="List Bullet")
+
+    resp = doc.get("responsibilities") or []
+    if resp:
+        document.add_heading("1.4 Authorities & Responsibilities", level=2)
+        for r_item in resp:
+            document.add_paragraph(r_item, style="List Bullet")
+
+    # ── 2.0 Abbreviations ──────────────────────────────
+    abbrevs = doc.get("abbreviations") or []
+    if abbrevs:
+        document.add_heading("2.0 Abbreviations and Definitions", level=1)
+        at = document.add_table(rows=1, cols=2)
+        at.alignment = WD_TABLE_ALIGNMENT.CENTER
+        hdr = at.rows[0].cells
+        hdr[0].text, hdr[1].text = "Terms & Abbreviations", "Definition"
+        for c in hdr:
+            _docx_set_cell_background(c, NAPCO_BLUE_HEX)
+            for p in c.paragraphs:
+                for run in p.runs:
+                    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                    run.font.bold = True
+        for a in abbrevs:
+            row = at.add_row().cells
+            row[0].text = a.get("term", "")
+            row[1].text = a.get("definition", "")
+            for run in row[0].paragraphs[0].runs:
+                run.font.bold = True
+
+    # ── 3.0 Procedure ──────────────────────────────
+    document.add_heading("3.0 Procedure (Narrative or Flowchart)", level=1)
+    steps = doc.get("procedure_steps") or []
+    step_num = 0
+    for step in steps:
+        stype = step.get("type", "step")
+        if stype == "input_row":
+            items = step.get("items", [])
+            titles = "; ".join(it.get("title", "") for it in items)
+            heading = step.get("heading", "Trigger Sources")
+            intro   = step.get("intro", "This process may be triggered by any of the following")
+            document.add_heading(heading, level=3)
+            document.add_paragraph(f"{intro}: {titles}.")
+            continue
+        if stype == "branch_split":
+            for br in step.get("branches", []):
+                bp = document.add_paragraph()
+                bp.add_run(br.get("label", "")).bold = True
+                for s in br.get("steps", []):
+                    document.add_paragraph(s.get("title", ""), style="List Bullet")
+            continue
+        step_num += 1
+        document.add_heading(f"{step_num}. {step.get('title','')}", level=3)
+        if step.get("text"):
+            document.add_paragraph(step["text"])
+        if step.get("side_branch"):
+            sp = document.add_paragraph()
+            sp.add_run(f"→ In parallel: {step['side_branch'].get('title','')}").italic = True
+
+    # ── Flowchart image(s) ──────────────────────────────
+    if steps:
+        document.add_heading("Process Flowchart", level=2)
+        use_lane_grid = _should_use_lane_grid(steps)
+        if use_lane_grid:
+            ChartClass = LaneGridFlowchart
+            lane_order = []
+            for s in steps:
+                lane = (s.get("swimlane") or "General").strip() or "General"
+                if lane not in lane_order:
+                    lane_order.append(lane)
+            chart_kwargs = {"lane_order": lane_order}
+        else:
+            ChartClass = SwimlaneFlowchart
+            chart_kwargs = {}
+
+        max_h_pt = 24 * cm  # comfortable single-page image height budget
+        chunks, current = [], []
+        for step in steps:
+            trial = current + [step]
+            if ChartClass(trial, avail_w_pt, **chart_kwargs).total_h > max_h_pt and current:
+                chunks.append(current)
+                current = [step]
+            else:
+                current = trial
+        if current:
+            chunks.append(current)
+
+        for i, chunk in enumerate(chunks):
+            chart = ChartClass(chunk, avail_w_pt, **chart_kwargs)
+            try:
+                png_bytes = _flowable_to_png_bytes(chart, chart.width, chart.total_h)
+                p_img = document.add_paragraph()
+                p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p_img.add_run().add_picture(io.BytesIO(png_bytes), width=Cm(17))
+            except Exception as e:
+                document.add_paragraph(f"[Flowchart image could not be generated: {e}]")
+            if i < len(chunks) - 1:
+                document.add_page_break()
+                document.add_heading("Process Flowchart (continued)", level=2)
+
+    # ── 4.0 Associated Documentation ──────────────────────────────
+    document.add_heading("4.0 Associated Documentation", level=1)
+
+    def _ref_table(refs, heading):
+        if not refs:
+            return
+        document.add_heading(heading, level=2)
+        rt = document.add_table(rows=1, cols=2)
+        rt.alignment = WD_TABLE_ALIGNMENT.CENTER
+        hdr = rt.rows[0].cells
+        hdr[0].text, hdr[1].text = "Code", "Title"
+        for c in hdr:
+            _docx_set_cell_background(c, NAPCO_BLUE_HEX)
+            for p in c.paragraphs:
+                for run in p.runs:
+                    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                    run.font.bold = True
+        for r in refs:
+            row = rt.add_row().cells
+            row[0].text = r.get("code", "")
+            row[1].text = r.get("title", "")
+
+    _ref_table(doc.get("related_docs") or [],      "4.1 Related Documents")
+    _ref_table(doc.get("resulting_records") or [], "4.2 Resulting Records")
+    _ref_table(doc.get("ext_references") or [],    "4.3 Internal / External References")
+
+    buf = io.BytesIO()
+    document.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+# ─────────────────────────────────────────────
 # MAIN PAGE
 # ─────────────────────────────────────────────
 def show():
@@ -1216,8 +1650,8 @@ def show():
                         .eq("doc_id", doc["id"]).order("revision").execute()
                     doc["_revisions"] = rev_res.data or []
 
-                    col_dl, _ = st.columns([2,8])
-                    with col_dl:
+                    col_dl1, col_dl2, _ = st.columns([2, 2, 6])
+                    with col_dl1:
                         if st.button("⬇️ Generate PDF", key=f"gen_{doc['id']}"):
                             with st.spinner("Generating PDF…"):
                                 try:
@@ -1231,6 +1665,20 @@ def show():
                                     )
                                 except Exception as e:
                                     st.error(f"PDF error: {e}")
+                    with col_dl2:
+                        if st.button("📝 Generate Word", key=f"genw_{doc['id']}"):
+                            with st.spinner("Generating Word document…"):
+                                try:
+                                    docx_bytes = generate_docx(doc)
+                                    st.download_button(
+                                        label="📥 Click to Download",
+                                        data=docx_bytes,
+                                        file_name=f"{doc.get('doc_code','document')}.docx",
+                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                        key=f"dlw_{doc['id']}",
+                                    )
+                                except Exception as e:
+                                    st.error(f"Word document error: {e}")
 
                     _render_document(sb, doc, uid)
 
