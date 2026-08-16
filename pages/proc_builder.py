@@ -1218,24 +1218,72 @@ def _flowable_to_png_bytes(flowable, width_pt, height_pt, dpi=150):
     return png_bytes
 
 
+_TBLPR_ORDER = [
+    "tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
+    "tblStyleColBandSize", "tblW", "jc", "tblCellSpacing", "tblInd",
+    "tblBorders", "shd", "tblLayout", "tblCellMar", "tblLook",
+    "tblCaption", "tblDescription", "tblPrChange",
+]
+_RPR_ORDER = [
+    "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike",
+    "dstrike", "outline", "shadow", "emboss", "imprint", "noProof",
+    "snapToGrid", "vanish", "webHidden", "color", "spacing", "w", "kern",
+    "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd",
+    "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout",
+    "specVanish", "oMath", "rPrChange",
+]
+
+def _docx_insert_ordered(parent, new_el, tag_local_name, order):
+    """Word enforces strict child-element ordering inside its complex types
+    (tblPr, rPr, etc.) and silently drops elements that violate it —
+    LibreOffice is lenient about this and renders them anyway, which is why
+    a fix that looks correct in a LibreOffice-rendered preview can still be
+    invisible in real Word. This inserts new_el at the schema-correct
+    position among parent's existing children instead of just appending."""
+    idx = order.index(tag_local_name)
+    for existing in list(parent):
+        existing_tag = existing.tag.split("}")[-1]
+        if existing_tag in order and order.index(existing_tag) > idx:
+            existing.addprevious(new_el)
+            return
+    parent.append(new_el)
+
+
 def _docx_set_cell_background(cell, hex_color):
     """python-docx has no direct API for cell shading — patches the cell's
-    underlying XML directly."""
+    underlying XML directly. Removes any existing w:shd first so repeated
+    calls on the same cell (e.g. merged cells, where several 'cells' indices
+    alias to the same underlying element) never produce duplicate w:shd
+    children — Word rejects that even though LibreOffice/python-docx don't
+    complain when re-opening the file."""
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    tcPr = cell._tc.get_or_add_tcPr()
+    existing = tcPr.find(qn("w:shd"))
+    if existing is not None:
+        tcPr.remove(existing)
     shd = OxmlElement("w:shd")
     shd.set(qn("w:fill"), hex_color)
-    cell._tc.get_or_add_tcPr().append(shd)
+    tcPr.append(shd)  # shd is late in CT_TcPrBase order; tcPr is normally
+                       # empty/near-empty for a freshly created cell, so a
+                       # plain append lands correctly here in practice
 
 
 def _docx_set_table_borders(table, size=4, color="999999"):
     """Adds a simple grid border to every cell of the table. Relying on a
     named 'Table Grid' style can silently fail depending on the base
-    template, so this sets the border XML directly for guaranteed results."""
+    template, so this sets the border XML directly for guaranteed results —
+    inserted at the schema-correct position within tblPr (see
+    _docx_insert_ordered) since Word ignores an out-of-order tblBorders
+    element instead of erroring on it. Removes any existing tblBorders
+    first so repeated calls stay idempotent."""
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
     tbl = table._tbl
     tblPr = tbl.tblPr
+    existing = tblPr.find(qn("w:tblBorders"))
+    if existing is not None:
+        tblPr.remove(existing)
     borders = OxmlElement("w:tblBorders")
     for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
         el = OxmlElement(f"w:{edge}")
@@ -1244,7 +1292,7 @@ def _docx_set_table_borders(table, size=4, color="999999"):
         el.set(qn("w:space"), "0")
         el.set(qn("w:color"), color)
         borders.append(el)
-    tblPr.append(borders)
+    _docx_insert_ordered(tblPr, borders, "tblBorders", _TBLPR_ORDER)
 
 
 def _docx_apply_font_everywhere(document, font_name="Trebuchet MS"):
@@ -1267,7 +1315,7 @@ def _docx_apply_font_everywhere(document, font_name="Trebuchet MS"):
         rFonts = rPr.find(qn("w:rFonts"))
         if rFonts is None:
             rFonts = OxmlElement("w:rFonts")
-            rPr.append(rFonts)
+            _docx_insert_ordered(rPr, rFonts, "rFonts", _RPR_ORDER)
         rFonts.set(qn("w:ascii"), font_name)
         rFonts.set(qn("w:hAnsi"), font_name)
         rFonts.set(qn("w:cs"), font_name)
@@ -1330,16 +1378,16 @@ def _docx_add_header_table(document, doc_code, title_txt, adoption, issue_date, 
     tbl = header.add_table(rows=2, cols=6, width=Cm(17))
     tbl.autofit = False
     _docx_set_table_borders(tbl)
+
     widths = [Cm(2.2), Cm(7.6), Cm(2.8), Cm(2.2), Cm(2.2), Cm(2.0)]
-    hdr_cells = tbl.rows[0].cells
-    hdr_cells[0].merge(hdr_cells[0])
-    row1 = ["TITLE", title_txt.upper(), "", "", "", ""]
-    # Row 1: TITLE | value (merged) | (blank) | (blank) | NBR OF PAGES-ish | (blank)
-    r1 = tbl.rows[0].cells
-    r1[0].text = "TITLE"
-    r1[1].merge(r1[4])
-    r1[1].text = title_txt.upper()
-    r1[5].text = "QUALITY PROCEDURE"
+    # Set column widths on every cell BEFORE any merge happens. After a
+    # merge, python-docx aliases several 'cells' indices to the same
+    # underlying element — re-setting .width on those afterward corrupts
+    # the XML (duplicate w:tcW elements Word rejects, even though
+    # LibreOffice/python-docx silently tolerate it on re-open).
+    for row in tbl.rows:
+        for ci, w in enumerate(widths):
+            row.cells[ci].width = w
 
     r2 = tbl.rows[1].cells
     r2[0].text = "CONTROL NBR."
@@ -1349,9 +1397,11 @@ def _docx_add_header_table(document, doc_code, title_txt, adoption, issue_date, 
     r2[4].text = "REVISION DATE"
     r2[5].text = str(rev_date)
 
-    for ci, w in enumerate(widths):
-        for row in tbl.rows:
-            row.cells[ci].width = w
+    r1 = tbl.rows[0].cells
+    r1[0].text = "TITLE"
+    r1[5].text = "QUALITY PROCEDURE"
+    r1[1].merge(r1[4])
+    r1[1].text = title_txt.upper()
 
     for row in tbl.rows:
         for cell in row.cells:
