@@ -1228,6 +1228,70 @@ def _docx_set_cell_background(cell, hex_color):
     cell._tc.get_or_add_tcPr().append(shd)
 
 
+def _docx_set_table_borders(table, size=4, color="999999"):
+    """Adds a simple grid border to every cell of the table. Relying on a
+    named 'Table Grid' style can silently fail depending on the base
+    template, so this sets the border XML directly for guaranteed results."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), str(size))
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), color)
+        borders.append(el)
+    tblPr.append(borders)
+
+
+def _docx_apply_font_everywhere(document, font_name="Trebuchet MS"):
+    """Sets the default document font AND force-applies it to every run
+    already created (paragraphs, headings, tables, header/footer) — relying
+    on style cascade alone can render inconsistently across Word/LibreOffice."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    document.styles["Normal"].font.name = font_name
+    for style_name in ["Heading 1", "Heading 2", "Heading 3", "Heading 4"]:
+        try:
+            document.styles[style_name].font.name = font_name
+        except KeyError:
+            pass
+
+    def _set_run_font(run):
+        run.font.name = font_name
+        rPr = run._element.get_or_add_rPr()
+        rFonts = rPr.find(qn("w:rFonts"))
+        if rFonts is None:
+            rFonts = OxmlElement("w:rFonts")
+            rPr.append(rFonts)
+        rFonts.set(qn("w:ascii"), font_name)
+        rFonts.set(qn("w:hAnsi"), font_name)
+        rFonts.set(qn("w:cs"), font_name)
+
+    def _walk_paragraphs(paragraphs):
+        for p in paragraphs:
+            for r in p.runs:
+                _set_run_font(r)
+
+    def _walk_tables(tables):
+        for t in tables:
+            for row in t.rows:
+                for cell in row.cells:
+                    _walk_paragraphs(cell.paragraphs)
+
+    _walk_paragraphs(document.paragraphs)
+    _walk_tables(document.tables)
+    for section in document.sections:
+        _walk_paragraphs(section.header.paragraphs)
+        _walk_tables(section.header.tables)
+        _walk_paragraphs(section.footer.paragraphs)
+        _walk_tables(section.footer.tables)
+
+
 def _docx_add_footer_disclaimer(document):
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     section = document.sections[0]
@@ -1265,6 +1329,7 @@ def _docx_add_header_table(document, doc_code, title_txt, adoption, issue_date, 
 
     tbl = header.add_table(rows=2, cols=6, width=Cm(17))
     tbl.autofit = False
+    _docx_set_table_borders(tbl)
     widths = [Cm(2.2), Cm(7.6), Cm(2.8), Cm(2.2), Cm(2.2), Cm(2.0)]
     hdr_cells = tbl.rows[0].cells
     hdr_cells[0].merge(hdr_cells[0])
@@ -1358,6 +1423,7 @@ def generate_docx(doc):
         n = len(approvals)
         ap = document.add_table(rows=5, cols=n + 1)
         ap.alignment = WD_TABLE_ALIGNMENT.CENTER
+        _docx_set_table_borders(ap)
         labels = ["APPROVED BY", "Department", "Function", "Signature", "Date"]
         for ri, lbl in enumerate(labels):
             ap.rows[ri].cells[0].text = lbl
@@ -1388,6 +1454,7 @@ def generate_docx(doc):
     adopt_rows = 2 if doc.get("reviewed_date") else 1
     adopt_t = document.add_table(rows=adopt_rows, cols=2)
     adopt_t.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _docx_set_table_borders(adopt_t)
     adopt_t.rows[0].cells[0].text = "Date of Adoption"
     adopt_t.rows[0].cells[1].text = str(adoption)
     if doc.get("reviewed_date"):
@@ -1406,6 +1473,7 @@ def generate_docx(doc):
     if revisions:
         rt = document.add_table(rows=1, cols=4)
         rt.alignment = WD_TABLE_ALIGNMENT.CENTER
+        _docx_set_table_borders(rt)
         hdr = rt.rows[0].cells
         for i, lbl in enumerate(["Revision", "Date", "Status", "Description"]):
             hdr[i].text = lbl
@@ -1477,6 +1545,7 @@ def generate_docx(doc):
         document.add_heading("2.0 Abbreviations and Definitions", level=1)
         at = document.add_table(rows=1, cols=2)
         at.alignment = WD_TABLE_ALIGNMENT.CENTER
+        _docx_set_table_borders(at)
         hdr = at.rows[0].cells
         hdr[0].text, hdr[1].text = "Terms & Abbreviations", "Definition"
         for c in hdr:
@@ -1571,6 +1640,7 @@ def generate_docx(doc):
         document.add_heading(heading, level=2)
         rt = document.add_table(rows=1, cols=2)
         rt.alignment = WD_TABLE_ALIGNMENT.CENTER
+        _docx_set_table_borders(rt)
         hdr = rt.rows[0].cells
         hdr[0].text, hdr[1].text = "Code", "Title"
         for c in hdr:
@@ -1587,6 +1657,8 @@ def generate_docx(doc):
     _ref_table(doc.get("related_docs") or [],      "4.1 Related Documents")
     _ref_table(doc.get("resulting_records") or [], "4.2 Resulting Records")
     _ref_table(doc.get("ext_references") or [],    "4.3 Internal / External References")
+
+    _docx_apply_font_everywhere(document, "Trebuchet MS")
 
     buf = io.BytesIO()
     document.save(buf)
