@@ -561,6 +561,13 @@ class SwimlaneFlowchart(Flowable):
                             _draw_arrowhead(c, col_cx, y_end, self.ARROW_COLOR)
                         y_cursor -= box_h + self.BRANCH_V_GAP
                         prev_box_bottom = box_cy - box_h / 2
+                    if prev_box_bottom is None:
+                        # Empty pass-through branch (no steps, no loop_to):
+                        # it "falls straight through" to the merge — anchor
+                        # its bottom at its own arrival point rather than a
+                        # nonexistent last box, so the merge-height math
+                        # downstream never sees a None.
+                        prev_box_bottom = y_cursor
                     col_bottom_pairs.append((col_cx, prev_box_bottom))
 
                 # Fan-in: converge forward-going column bottoms into the next
