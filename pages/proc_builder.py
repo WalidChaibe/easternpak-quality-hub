@@ -210,6 +210,13 @@ class SwimlaneFlowchart(Flowable):
         branches that later merge back into a single point (step type
         "branch_split"), e.g. "Outsource Calibration? Yes/No" each leading
         down their own short sequence before rejoining the main flow
+      - a loop-back: any regular step, or any branch inside a branch_split,
+        can carry "loop_to": "<step id>" to route a real arrow back up to
+        an earlier step instead of continuing forward — e.g. "Fail" ->
+        loop back to "Re-test". Routed out the left side, up a dedicated
+        lane, and into the target box. Only top-level steps (ones with an
+        "id") can be loop targets; a step/branch with loop_to has no
+        further forward continuation from that path.
 
     Everything else is a single centered step column, same as before.
     Box/row heights are computed up front from the actual wrapped text, so
@@ -234,7 +241,8 @@ class SwimlaneFlowchart(Flowable):
     BRANCH_GAP    = 0.5*cm     # gap between branch columns
     BRANCH_V_GAP  = 0.55*cm    # vertical gap between boxes within a branch column
     BRANCH_FONT_SZ= 7.3
-    BRANCH_LBL_H  = 0.4*cm     # space for the branch label ("YES - External") above its column
+    BRANCH_LBL_H  = 0.55*cm    # space for the branch label ("YES - External") above its column
+    LOOP_STUB_H   = 1.0*cm     # height reserved for a loop branch's routing stub (no box)
 
     BOX_FILL     = colors.HexColor("#EAF3FB")
     BOX_BORDER   = NAPCO_BLUE
@@ -244,6 +252,7 @@ class SwimlaneFlowchart(Flowable):
     BRANCH_BORDER= colors.HexColor("#B03A3A")
     SHADOW_COLOR = colors.HexColor("#DADADA")
     ARROW_COLOR  = colors.HexColor("#4A4A4A")
+    LOOP_COLOR   = colors.HexColor("#B03A3A")
 
     def __init__(self, steps, available_width, all_lanes=None):
         # all_lanes accepted for backward compatibility; unused.
@@ -257,6 +266,17 @@ class SwimlaneFlowchart(Flowable):
         self._has_branch = any(s.get("side_branch") for s in steps
                                 if s.get("type", "step") == "step")
         self.cx = self.width * 0.36 if self._has_branch else self.width / 2
+
+        # Loop-back arrows route through a dedicated lane near the left edge.
+        self.loop_lane_x = self.LANE_PAD + 0.4*cm
+
+        # Map step id -> index, for loop_to lookups. Only top-level steps
+        # (not ones nested inside a branch_split branch) can be loop targets.
+        self._id_to_idx = {}
+        for i, s in enumerate(steps):
+            sid = s.get("id")
+            if sid:
+                self._id_to_idx[sid] = i
 
         self._prepared = []
         for step in steps:
@@ -285,6 +305,14 @@ class SwimlaneFlowchart(Flowable):
                 branches = step.get("branches", [])
                 prepared_branches = []
                 for br in branches:
+                    loop_to = br.get("loop_to")
+                    if loop_to:
+                        prepared_branches.append({
+                            "label": br.get("label", ""), "steps": [],
+                            "col_h": self.BRANCH_LBL_H + self.LOOP_STUB_H,
+                            "loop_to": loop_to,
+                        })
+                        continue
                     br_steps = []
                     col_h = self.BRANCH_LBL_H
                     for s in br.get("steps", []):
@@ -296,9 +324,10 @@ class SwimlaneFlowchart(Flowable):
                         col_h += box_h + self.BRANCH_V_GAP
                     prepared_branches.append({
                         "label": br.get("label",""), "steps": br_steps, "col_h": col_h,
+                        "loop_to": None,
                     })
                 max_col_h = max((b["col_h"] for b in prepared_branches), default=0)
-                bus_h = 0.6*cm  # room for the converging arrows below the columns
+                bus_h = 0.9*cm  # room for the converging arrows below the columns
                 self._prepared.append({
                     "type": "branch_split", "branches": prepared_branches,
                     "max_col_h": max_col_h, "bus_h": bus_h, "box_h": max_col_h + bus_h,
@@ -327,7 +356,7 @@ class SwimlaneFlowchart(Flowable):
 
             self._prepared.append({
                 "type": "step", "shape": shape, "lines": lines, "box_h": box_h,
-                "side_branch": side_prepared,
+                "side_branch": side_prepared, "loop_to": step.get("loop_to"),
             })
 
         self._step_heights = []
@@ -372,6 +401,55 @@ class SwimlaneFlowchart(Flowable):
         start_y = cy + (len(lines) - 1) * line_h / 2
         for li, ln in enumerate(lines):
             c.drawCentredString(cx, start_y - li * line_h, ln)
+
+    def _draw_loop_arrow(self, c, start_x, start_y, target_idx, label, travel_y=None):
+        """Routes a loop-back arrow: from (start_x, start_y) down/up to a
+        clear travel level (travel_y, defaults to start_y for the simple
+        single-column case), left to the loop lane, up/down to the target
+        step's vertical center, then right into the target box's left edge.
+        travel_y matters when start_x isn't already the leftmost thing at
+        that height (e.g. a branch_split column that isn't the leftmost
+        branch) — without it the horizontal segment would cut straight
+        through whatever sits between start_x and the loop lane. Silently
+        does nothing if the target id wasn't found (bad/missing reference)
+        rather than crash the whole render over one bad loop_to."""
+        if target_idx is None:
+            return
+        if travel_y is None:
+            travel_y = start_y
+        target_cy, target_bh = self._step_geom(target_idx)
+        target_p = self._prepared[target_idx]
+        if target_p["type"] == "step" and target_p.get("shape") == "diamond":
+            target_left = self.cx - self.DIA_W / 2
+        else:
+            target_left = self.cx - self.BOX_W / 2
+
+        lane_x = self.loop_lane_x
+        c.setStrokeColor(self.LOOP_COLOR)
+        c.setFillColor(self.LOOP_COLOR)
+        c.setLineWidth(1.1)
+        c.setDash([3, 2])
+
+        c.line(start_x, start_y, start_x, travel_y)
+        c.line(start_x, travel_y, lane_x, travel_y)
+        c.line(lane_x, travel_y, lane_x, target_cy)
+        end_x = target_left - 0.05*cm
+        c.line(lane_x, target_cy, end_x, target_cy)
+        c.setDash([])
+        _draw_arrowhead_right(c, end_x, target_cy, self.LOOP_COLOR)
+
+        if label:
+            c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
+            label_w = stringWidth(label, self.FONT_B, self.ROLE_FONT_SZ) + 0.3*cm
+            label_h = 0.34*cm
+            mid_y = (travel_y + target_cy) / 2
+            c.setFillColor(colors.white)
+            c.setStrokeColor(self.LOOP_COLOR)
+            c.setLineWidth(0.6)
+            c.roundRect(lane_x - label_w/2, mid_y - label_h/2, label_w, label_h,
+                        radius=label_h/2, fill=1, stroke=1)
+            c.setFillColor(self.LOOP_COLOR)
+            c.drawCentredString(lane_x, mid_y - 0.09*cm, label)
 
     def draw(self):
         c  = self.canv
@@ -425,7 +503,8 @@ class SwimlaneFlowchart(Flowable):
                 continue
 
             # ── Branch split: decision fans out into parallel columns, ──
-            # ── each column runs its own steps, then all columns merge ──
+            # ── each column runs its own steps (or loops back), then all ──
+            # ── forward-going columns merge back into the next step ──
             if p["type"] == "branch_split":
                 branches  = p["branches"]
                 n         = len(branches)
@@ -434,8 +513,6 @@ class SwimlaneFlowchart(Flowable):
                 start_x   = cx - total_w / 2
                 block_top = cy + bh / 2   # top of this whole block (right below the decision)
 
-                # Fan-out from the previous step's bottom into a shared bus,
-                # then down into each column.
                 col_centers = [start_x + i * (self.BRANCH_COL_W + gap) + self.BRANCH_COL_W / 2
                                for i in range(n)]
                 if idx > 0:
@@ -451,12 +528,20 @@ class SwimlaneFlowchart(Flowable):
                         c.line(col_cx, fanout_bus_y, col_cx, y_end)
                         _draw_arrowhead(c, col_cx, y_end, self.ARROW_COLOR)
 
-                col_bottoms = []
+                col_bottom_pairs = []  # (col_cx, bottom_y) — forward-going branches only
                 for bi, br in enumerate(branches):
                     col_cx = col_centers[bi]
                     c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
                     c.setFillColor(self.ARROW_COLOR)
                     c.drawCentredString(col_cx, block_top - self.BRANCH_LBL_H + 0.12*cm, br["label"])
+
+                    if br.get("loop_to"):
+                        arrival_y = block_top - self.BRANCH_LBL_H
+                        travel_y = block_top - p["max_col_h"] - 0.15*cm
+                        target_idx = self._id_to_idx.get(br["loop_to"])
+                        self._draw_loop_arrow(c, col_cx, arrival_y, target_idx, "",
+                                               travel_y=travel_y)
+                        continue
 
                     y_cursor = block_top - self.BRANCH_LBL_H
                     prev_box_bottom = None
@@ -476,23 +561,27 @@ class SwimlaneFlowchart(Flowable):
                             _draw_arrowhead(c, col_cx, y_end, self.ARROW_COLOR)
                         y_cursor -= box_h + self.BRANCH_V_GAP
                         prev_box_bottom = box_cy - box_h / 2
-                    col_bottoms.append(prev_box_bottom)
+                    col_bottom_pairs.append((col_cx, prev_box_bottom))
 
-                # Fan-in: converge all column bottoms into the next step.
-                bus_y = min(col_bottoms) - (p["bus_h"] * 0.5 if col_bottoms else 0)
-                c.setStrokeColor(self.ARROW_COLOR)
-                c.setLineWidth(1.0)
-                for cb, col_cx in zip(col_bottoms, col_centers):
-                    c.line(col_cx, cb, col_cx, bus_y)
-                c.line(min(col_centers), bus_y, max(col_centers), bus_y)
+                # Fan-in: converge forward-going column bottoms into the next
+                # step. Loop branches don't feed this — they've already
+                # routed back to their target.
+                if col_bottom_pairs:
+                    bus_y = min(b for _, b in col_bottom_pairs) - p["bus_h"] * 0.8
+                    xs = [x for x, _ in col_bottom_pairs]
+                    c.setStrokeColor(self.ARROW_COLOR)
+                    c.setLineWidth(1.0)
+                    for col_cx, cb in col_bottom_pairs:
+                        c.line(col_cx, cb, col_cx, bus_y)
+                    c.line(min(xs), bus_y, max(xs), bus_y)
 
-                if idx < len(self.steps) - 1:
-                    next_cy, next_bh = self._step_geom(idx + 1)
-                    next_top = next_cy + next_bh / 2
-                    y_end = next_top + 0.06*cm
-                    c.setFillColor(self.ARROW_COLOR)
-                    c.line(cx, bus_y, cx, y_end)
-                    _draw_arrowhead(c, cx, y_end, self.ARROW_COLOR)
+                    if idx < len(self.steps) - 1:
+                        next_cy, next_bh = self._step_geom(idx + 1)
+                        next_top = next_cy + next_bh / 2
+                        y_end = next_top + 0.06*cm
+                        c.setFillColor(self.ARROW_COLOR)
+                        c.line(cx, bus_y, cx, y_end)
+                        _draw_arrowhead(c, cx, y_end, self.ARROW_COLOR)
                 continue
 
             # ── Regular step (rect / diamond) ─────────────────
@@ -539,6 +628,15 @@ class SwimlaneFlowchart(Flowable):
                 c.line(x_start, cy, x_end, cy)
                 _draw_arrowhead_right(c, x_end, cy, self.ARROW_COLOR)
 
+            # ── Loop-back arrow (this step returns to an earlier step ──
+            # ── instead of continuing forward) ─────────────────────────
+            loop_to = p.get("loop_to")
+            if loop_to:
+                target_idx = self._id_to_idx.get(loop_to)
+                exit_x = cx - (self.DIA_W/2 if shape == "diamond" else self.BOX_W/2)
+                self._draw_loop_arrow(c, exit_x, cy, target_idx, conn or "Retry")
+                continue
+
             # ── Arrow down to next step (skipped if the next step is a ──
             # ── branch_split — it draws its own fan-out from our bottom) ──
             if idx < len(self.steps) - 1 and not next_is_branch_split:
@@ -570,12 +668,20 @@ class SwimlaneFlowchart(Flowable):
 def _should_use_lane_grid(steps):
     """Cross-functional swimlanes read far better than a single vertical
     chain when a document has a small, consistently-reused set of roles
-    and no branch/merge points to represent. Docs with branch_split or
-    input_row keep the single-column renderer since lane-grid can't
-    express branching/merging cleanly."""
+    and no branch/merge points to represent. Docs with branch_split,
+    input_row, or a loop_to reference keep the single-column renderer,
+    since lane-grid can't express branching/merging/looping cleanly."""
     if not steps:
         return False
     if any(s.get("type") in ("branch_split", "input_row") for s in steps):
+        return False
+    if any(s.get("loop_to") for s in steps):
+        return False
+    if any(
+        b.get("loop_to")
+        for s in steps if s.get("type") == "branch_split"
+        for b in s.get("branches", [])
+    ):
         return False
     lanes = []
     for s in steps:
@@ -1416,6 +1522,32 @@ def _docx_add_header_table(document, doc_code, title_txt, adoption, issue_date, 
                 run.font.bold = True
 
 
+def _docx_fix_duplicate_drawing_ids(document):
+    """python-docx assigns wp:docPr id starting from 1 independently for
+    each part it touches (body, header, footer) since it has no counter
+    shared across add_picture() calls made in different contexts. Duplicate
+    docPr ids anywhere in the document (e.g. the cover-page logo and the
+    header logo both getting id=1) is a known cause of 'Word experienced an
+    error trying to open the file' — silently tolerated by LibreOffice and
+    python-docx's own reader, but not by real Word. This reassigns strictly
+    unique ids across the whole document: body + every header + every
+    footer."""
+    from docx.oxml.ns import qn
+    counter = [1]
+
+    def _renumber(root):
+        if root is None:
+            return
+        for el in root.iter(qn("wp:docPr")):
+            el.set("id", str(counter[0]))
+            counter[0] += 1
+
+    _renumber(document.element.body)
+    for section in document.sections:
+        _renumber(section.header._element)
+        _renumber(section.footer._element)
+
+
 def generate_docx(doc):
     """Generates a Word (.docx) version of the document, visually matching
     generate_pdf — same sections, same flowchart images (rasterized from the
@@ -1709,6 +1841,7 @@ def generate_docx(doc):
     _ref_table(doc.get("ext_references") or [],    "4.3 Internal / External References")
 
     _docx_apply_font_everywhere(document, "Trebuchet MS")
+    _docx_fix_duplicate_drawing_ids(document)
 
     buf = io.BytesIO()
     document.save(buf)
