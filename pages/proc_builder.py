@@ -241,7 +241,8 @@ class SwimlaneFlowchart(Flowable):
     BRANCH_GAP    = 0.5*cm     # gap between branch columns
     BRANCH_V_GAP  = 0.55*cm    # vertical gap between boxes within a branch column
     BRANCH_FONT_SZ= 7.3
-    BRANCH_LBL_H  = 0.55*cm    # space for the branch label ("YES - External") above its column
+    BRANCH_LBL_H  = 0.8*cm     # total space above each column: fan-out tick + label + gaps
+    BRANCH_TICK_LEN = 0.30*cm  # length of the fan-out tick below the fan-out bus
     LOOP_STUB_H   = 1.0*cm     # height reserved for a loop branch's routing stub (no box)
 
     BOX_FILL     = colors.HexColor("#EAF3FB")
@@ -524,7 +525,10 @@ class SwimlaneFlowchart(Flowable):
                     c.line(cx, prev_bottom, cx, fanout_bus_y)
                     c.line(min(col_centers), fanout_bus_y, max(col_centers), fanout_bus_y)
                     for col_cx in col_centers:
-                        y_end = block_top - self.BRANCH_LBL_H + 0.06*cm
+                        # Fixed-length tick from the fan-out bus, independent
+                        # of BRANCH_LBL_H, so the label (drawn further below,
+                        # with its own clear gap) never lands on the arrowhead.
+                        y_end = fanout_bus_y - self.BRANCH_TICK_LEN
                         c.line(col_cx, fanout_bus_y, col_cx, y_end)
                         _draw_arrowhead(c, col_cx, y_end, self.ARROW_COLOR)
 
@@ -533,7 +537,10 @@ class SwimlaneFlowchart(Flowable):
                     col_cx = col_centers[bi]
                     c.setFont(self.FONT_B, self.ROLE_FONT_SZ)
                     c.setFillColor(self.ARROW_COLOR)
-                    c.drawCentredString(col_cx, block_top - self.BRANCH_LBL_H + 0.12*cm, br["label"])
+                    # Sits in the gap between the tick's arrowhead and where
+                    # the column's own content (box or loop arrival) begins.
+                    label_y = block_top - self.BRANCH_LBL_H + 0.16*cm
+                    c.drawCentredString(col_cx, label_y, br["label"])
 
                     if br.get("loop_to"):
                         arrival_y = block_top - self.BRANCH_LBL_H
@@ -575,7 +582,12 @@ class SwimlaneFlowchart(Flowable):
                 # routed back to their target.
                 if col_bottom_pairs:
                     bus_y = min(b for _, b in col_bottom_pairs) - p["bus_h"] * 0.8
-                    xs = [x for x, _ in col_bottom_pairs]
+                    # Must span out to cx too, not just the branch columns —
+                    # otherwise a single remaining forward branch (common
+                    # once a sibling branch has looped away) leaves the bus
+                    # line stopping short of the centerline the next-step
+                    # arrow actually starts from, reading as a broken link.
+                    xs = [x for x, _ in col_bottom_pairs] + [cx]
                     c.setStrokeColor(self.ARROW_COLOR)
                     c.setLineWidth(1.0)
                     for col_cx, cb in col_bottom_pairs:
