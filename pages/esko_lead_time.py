@@ -211,7 +211,22 @@ def show():
         st.dataframe(charts.per_project_table(per_project))
 
         st.divider()
-        col_pdf, col_xl1, col_xl2 = st.columns(3)
+
+        # ---- Top 7 lead-time contributors by owner (completed tasks) ----
+        top_owners = (
+            completed_mapped.groupby("completed_by")["task_duration_days"].sum()
+            .sort_values(ascending=False).head(7).reset_index()
+        )
+        top_owners.columns = ["completed_by", "total_days"]
+
+        # ---- Open projects over 15 days: internal vs customer-side hold ----
+        over15 = aged[aged["project_age"] > 15].copy()
+        over15["is_external"] = over15["pending_owner"].str.contains("REQUESTOR", case=False, na=False)
+        over15_internal = over15.loc[~over15["is_external"]].sort_values("project_age", ascending=False)
+        over15_internal_count = len(over15_internal)
+        over15_external_count = int(over15["is_external"].sum())
+
+        col_pdf, col_xl1, col_xl2, col_xl3 = st.columns(4)
         with col_pdf:
             if st.button("📥 Generate PDF report"):
                 buf = build_pdf(
@@ -222,6 +237,10 @@ def show():
                     open_by_stage_df=open_stage_counts,
                     open_by_owner_df=open_owner_counts,
                     ageing_df=ageing,
+                    top_owners_df=top_owners,
+                    over15_internal_df=over15_internal,
+                    over15_internal_count=over15_internal_count,
+                    over15_external_count=over15_external_count,
                     logo_path="static/napco_logo.png",
                 )
                 st.download_button("Download esko_lead_time_report.pdf", buf,
@@ -238,11 +257,20 @@ def show():
         with col_xl2:
             xl_buf2 = io.BytesIO()
             with pd.ExcelWriter(xl_buf2, engine="openpyxl") as writer:
-                aged.to_excel(writer, sheet_name="Open Projects by Stage", index=False)
+                aged.to_excel(writer, sheet_name="Open Projects Summary", index=False)
             xl_buf2.seek(0)
-            st.download_button("⬇️ Open projects by stage (.xlsx)", xl_buf2,
-                                file_name="open_projects_by_stage.xlsx",
+            st.download_button("⬇️ Open projects summary (.xlsx)", xl_buf2,
+                                file_name="open_projects_summary.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with col_xl3:
+            xl_buf3 = io.BytesIO()
+            with pd.ExcelWriter(xl_buf3, engine="openpyxl") as writer:
+                open_mapped.to_excel(writer, sheet_name="Open Projects Raw Data", index=False)
+            xl_buf3.seek(0)
+            st.download_button("⬇️ Open projects raw data (.xlsx)", xl_buf3,
+                                file_name="open_projects_raw.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
     with tab_open:
         if len(aged):
