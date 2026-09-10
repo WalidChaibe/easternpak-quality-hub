@@ -1,0 +1,30 @@
+stage_no,stage_name,step_name
+1,Artwork Development,Update Project Input
+1,Artwork Development,Upload Structural Design
+1,Artwork Development,Structural Design Review
+1,Artwork Development,Artwork Preparation
+1,Artwork Development,Artwork Review
+1,Artwork Development,Technical Approval
+2,Customer Artwork Approval,Artwork Customer Approval
+2,Customer Artwork Approval,Customer Requirement
+3,Mockup Preparation,Print Mockup
+3,Mockup Preparation,Mock-Up Production
+3,Mockup Preparation,Upload Mockup File
+3,Mockup Preparation,Digital Mockup Preparation
+4,Customer Mockup Approval,Customer Mockup Approval
+4,Customer Mockup Approval,Digital Mockup Customer Approval
+5,PDN Development,PDN Preparation
+5,PDN Development,PDN Review
+5,PDN Development,PDN Technical Approval
+5,PDN Development,PDN Corrugator & Converting Production Approval
+5,PDN Development,PDN Pre-Print Production Approval
+5,PDN Development,Digital Production Approval
+5,PDN Development,Step and Repeat preparation
+5,PDN Development,Step and Repeat Review
+5,PDN Development,Epak Designers Step and Repeat Approval
+5,PDN Development,File Merging
+6,Cliche Ordering Process,Epak-PS Cliche Production
+6,Cliche Ordering Process,Cliche Quality Checking
+6,Cliche Ordering Process,Cliche Re Order Request
+6,Cliche Ordering Process,Re Order Cliche Production
+7,Cliche Production,Cliche Production

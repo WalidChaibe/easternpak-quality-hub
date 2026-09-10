@@ -69,6 +69,7 @@ def show_sidebar():
             ("documents",    "📁  Document Register",        "documents"),
             ("audits",       "🔍  Internal Audits",          "audits"),
             ("proc_builder", "📄  Procedures & Processes",   "proc_builder"),
+            ("esko",         "⏱️  Esko Lead Time",           "esko"),
             ("admin",        "⚙️  User Management",          "admin"),
         ]
 
@@ -106,6 +107,8 @@ def route():
         from pages.audits       import show; show()
     elif page == "proc_builder":
         from pages.proc_builder import show; show()
+    elif page == "esko":
+        from pages.esko_lead_time import show; show()
     elif page == "admin":
         from pages.admin        import show; show()
 
