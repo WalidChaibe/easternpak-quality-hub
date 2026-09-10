@@ -1,18 +1,19 @@
 import streamlit as st
 import pandas as pd
+import io
 
 from utils.auth import require_auth
 
 from esko.load import load_export
 from esko.stages import (
-    load_stage_map, apply_stage_taxonomy, save_stage_map, existing_stages,
+    load_stage_map, apply_stage_taxonomy, drop_excluded, save_stage_map, existing_stages,
     add_step_to_stage, rename_stage, next_available_stage_no,
 )
 from esko.filters import split_completed_open, filter_truncated, apply_sidebar_filters, ExclusionLog
 from esko.metrics import per_project_metrics, per_step_metrics, weighted_lead_time, sanity_check_weighting
 from esko.pending import find_pending_task, open_project_ages, count_by_pending_stage, count_by_pending_owner, ageing_buckets_by_stage, oldest_open_projects
 from esko import charts
-from esko.deck import build_deck
+from esko.deck import build_pdf
 
 
 @st.cache_data
@@ -50,6 +51,8 @@ def show():
 
     completed_mapped, completed_unmapped = apply_stage_taxonomy(completed_raw, stage_map)
     open_mapped, open_unmapped = apply_stage_taxonomy(open_raw, stage_map)
+    completed_mapped = drop_excluded(completed_mapped)
+    open_mapped = drop_excluded(open_mapped)
 
     if len(date_range) == 2:
         completed_mapped = apply_sidebar_filters(completed_mapped, templates or None, completed_by or None, date_range, exclude_cliche)
@@ -208,20 +211,38 @@ def show():
         st.dataframe(charts.per_project_table(per_project))
 
         st.divider()
-        if st.button("📥 Generate PPTX report"):
-            buf = build_deck(
-                kpis=kpis,
-                stage_lead_time_df=stage_lead_time,
-                step_metrics_df=step_metrics,
-                per_project_df=per_project,
-                open_by_stage_df=open_stage_counts,
-                open_by_owner_df=open_owner_counts,
-                ageing_df=ageing,
-                logo_path="static/napco_logo.png",
-            )
-            st.download_button("Download esko_lead_time_report.pptx", buf,
-                                file_name="esko_lead_time_report.pptx",
-                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        col_pdf, col_xl1, col_xl2 = st.columns(3)
+        with col_pdf:
+            if st.button("📥 Generate PDF report"):
+                buf = build_pdf(
+                    kpis=kpis,
+                    stage_lead_time_df=stage_lead_time,
+                    step_metrics_df=step_metrics,
+                    per_project_df=per_project,
+                    open_by_stage_df=open_stage_counts,
+                    open_by_owner_df=open_owner_counts,
+                    ageing_df=ageing,
+                    logo_path="static/napco_logo.png",
+                )
+                st.download_button("Download esko_lead_time_report.pdf", buf,
+                                    file_name="esko_lead_time_report.pdf",
+                                    mime="application/pdf")
+        with col_xl1:
+            xl_buf = io.BytesIO()
+            with pd.ExcelWriter(xl_buf, engine="openpyxl") as writer:
+                per_project.to_excel(writer, sheet_name="Completed Projects", index=False)
+            xl_buf.seek(0)
+            st.download_button("⬇️ Completed projects (.xlsx)", xl_buf,
+                                file_name="completed_projects.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with col_xl2:
+            xl_buf2 = io.BytesIO()
+            with pd.ExcelWriter(xl_buf2, engine="openpyxl") as writer:
+                aged.to_excel(writer, sheet_name="Open Projects by Stage", index=False)
+            xl_buf2.seek(0)
+            st.download_button("⬇️ Open projects by stage (.xlsx)", xl_buf2,
+                                file_name="open_projects_by_stage.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     with tab_open:
         if len(aged):
