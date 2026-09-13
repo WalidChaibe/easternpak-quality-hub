@@ -212,12 +212,18 @@ def show():
 
         st.divider()
 
-        # ---- Top 7 lead-time contributors by owner (completed tasks) ----
+        # ---- Top 7 internal lead-time contributors, by assigned_to (not completed_by) ----
+        # Excludes _REQUESTOR/customer-assigned rows - those are the customer's own approval
+        # time, already covered by the Customer Artwork Approval finding elsewhere, and would
+        # otherwise dominate this "internal workload" chart misleadingly.
+        internal_assignments = completed_mapped[
+            ~completed_mapped["assigned_to"].str.contains("REQUESTOR", case=False, na=False)
+        ]
         top_owners = (
-            completed_mapped.groupby("completed_by")["task_duration_days"].sum()
+            internal_assignments.groupby("assigned_to")["task_duration_days"].sum()
             .sort_values(ascending=False).head(7).reset_index()
         )
-        top_owners.columns = ["completed_by", "total_days"]
+        top_owners.columns = ["assigned_to", "total_days"]
 
         # ---- Open projects over 15 days: internal vs customer-side hold ----
         over15 = aged[aged["project_age"] > 15].copy()
@@ -236,6 +242,9 @@ def show():
         age_dist = aged_bucketed["proj_age_bucket"].value_counts().reindex(age_bucket_labels).fillna(0)
 
         # ---- Slide 3: true system lead time, two lenses (closed-only vs. blended) ----
+        # Blended = every individually-completed task (task_completed populated), whether its
+        # parent project is closed or still open - averaged per step, then weighted by relative
+        # frequency exactly like the closed-only view, just on a larger, blended pool of rows.
         blended_tasks = pd.concat([
             completed_mapped[completed_mapped["task_completed"].notna()],
             open_mapped[open_mapped["task_completed"].notna()],
@@ -246,10 +255,9 @@ def show():
 
         # ---- Rework signal: how often the single busiest step recurs per project ----
         busiest_step_name = step_metrics.sort_values("count", ascending=False).iloc[0]["stage_name"]
-        rework_occurrences = (
-            completed_mapped[completed_mapped["stage_name"] == busiest_step_name]
-            .groupby("project_name").size().values
-        )
+        rework_by_project = completed_mapped[completed_mapped["stage_name"] == busiest_step_name].groupby("project_name").size()
+        rework_occurrences = rework_by_project.values
+        rework_recurrence_pct = 100.0 * (rework_by_project > 1).sum() / len(rework_by_project) if len(rework_by_project) else 0.0
 
         col_pdf, col_xl1, col_xl2, col_xl3 = st.columns(4)
         with col_pdf:
@@ -257,17 +265,20 @@ def show():
                 buf = build_pdf(
                     closed_project_count=completed_mapped["project_name"].nunique(),
                     closed_weighted_lead_time=total_system_lead_time,
+                    open_project_count=open_mapped["project_name"].nunique(),
                     open_age_bucket_labels=age_bucket_labels,
                     open_age_bucket_counts=age_dist.values.tolist(),
                     closed_only_total=total_system_lead_time,
                     blended_total=blended_total,
                     stage_lead_time_df=stage_lead_time,
+                    weighted_full_df=weighted,
                     top_owners_df=top_owners,
                     over15_internal_df=over15_internal,
                     over15_internal_count=over15_internal_count,
                     over15_external_count=over15_external_count,
                     rework_step_name=busiest_step_name,
                     rework_occurrence_counts=rework_occurrences,
+                    rework_recurrence_pct=rework_recurrence_pct,
                     per_project_df=per_project,
                     logo_path="static/napco_logo.png",
                 )

@@ -232,12 +232,15 @@ def add_kpi_page(c: canvas.Canvas, title, kpis: dict, footnote: str = None):
 
 
 
-def add_split_page(c: canvas.Canvas, title, left_title, left_stats: list, right_title, right_fig):
+def add_split_page(c: canvas.Canvas, title, left_title, left_stats: list, right_title, right_fig, right_subtitle: str = None):
     """Two halves side by side, sharing one title bar: left is a small stack of
-    big-number stat cards (value, label), right is a chart image. Used for
-    'closed vs. open at a glance' - the two populations are genuinely different
-    kinds of data (a rate for one, a distribution for the other), so putting
-    them on one page as a comparison reads better than two separate pages."""
+    big-number stat cards (value, label), right is a chart image with an
+    optional one-line subtitle (e.g. a total count the chart itself doesn't
+    show, since the chart's bars only show the breakdown, not the sum). Used
+    for 'closed vs. open at a glance' - the two populations are genuinely
+    different kinds of data (a rate for one, a distribution for the other),
+    so putting them on one page as a comparison reads better than two
+    separate pages."""
     c.setFillColor(WHITE)
     c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
     _title_bar(c, title)
@@ -271,15 +274,23 @@ def add_split_page(c: canvas.Canvas, title, left_title, left_stats: list, right_
     c.setLineWidth(1)
     c.line(mid_x, _y_from_top(BOX_Y_FROM_TOP + BOX_H), mid_x, _y_from_top(BOX_Y_FROM_TOP))
 
-    # Right half: sub-heading + chart
+    # Right half: sub-heading (+ optional total-count subtitle) + chart
     c.setFont("Helvetica-Bold", 16)
     c.setFillColor(TITLE_BLUE)
     c.drawString(mid_x + col_pad, _y_from_top(BOX_Y_FROM_TOP), right_title)
 
+    chart_top_offset = BOX_Y_FROM_TOP + 30
+    if right_subtitle:
+        c.setFont("Helvetica-Bold", 13)
+        c.setFillColor(DARK_TEXT)
+        c.drawString(mid_x + col_pad, _y_from_top(chart_top_offset), right_subtitle)
+        chart_top_offset += 26
+
     png_buf = _save_fig_png_bytes(right_fig)
     right_box_w = mid_x - col_pad - 20
-    box_y = _y_from_top(BOX_Y_FROM_TOP + 30 + BOX_H - 30)
-    c.drawImage(ImageReader(png_buf), mid_x + col_pad, box_y, width=right_box_w, height=BOX_H - 30,
+    right_box_h = BOX_H - (chart_top_offset - BOX_Y_FROM_TOP)
+    box_y = _y_from_top(chart_top_offset + right_box_h)
+    c.drawImage(ImageReader(png_buf), mid_x + col_pad, box_y, width=right_box_w, height=right_box_h,
                 preserveAspectRatio=True, anchor="c", mask="auto")
 
 
