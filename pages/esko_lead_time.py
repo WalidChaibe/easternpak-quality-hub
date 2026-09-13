@@ -212,18 +212,21 @@ def show():
 
         st.divider()
 
-        # ---- Top 7 internal lead-time contributors, by assigned_to (not completed_by) ----
-        # Excludes _REQUESTOR/customer-assigned rows - those are the customer's own approval
-        # time, already covered by the Customer Artwork Approval finding elsewhere, and would
-        # otherwise dominate this "internal workload" chart misleadingly.
+        # ---- Slowest average task duration by assignee (min. 10 tasks, NOT total volume) ----
+        # Ranking by total days summed would credit high-volume-but-fast people (e.g. someone who
+        # touches nearly every project but is quick per task) as if they were the biggest problem,
+        # purely because of activity volume - the same frequency-vs-duration conflation already
+        # fixed for steps. avg_days per task is the genuine per-person speed signal; a minimum task
+        # count avoids one or two atypical tasks making someone look artificially slow or fast.
         internal_assignments = completed_mapped[
             ~completed_mapped["assigned_to"].str.contains("REQUESTOR", case=False, na=False)
         ]
-        top_owners = (
-            internal_assignments.groupby("assigned_to")["task_duration_days"].sum()
-            .sort_values(ascending=False).head(7).reset_index()
-        )
-        top_owners.columns = ["assigned_to", "total_days"]
+        owner_stats = internal_assignments.groupby("assigned_to")["task_duration_days"].agg(
+            count="count", avg_days="mean"
+        ).reset_index()
+        owner_stats_filtered = owner_stats[owner_stats["count"] >= 10]
+        top_owners = owner_stats_filtered.sort_values("avg_days", ascending=False).head(7)
+        top_owners_median_avg_days = float(owner_stats_filtered["avg_days"].median()) if len(owner_stats_filtered) else 0.0
 
         # ---- Open projects over 15 days: internal vs customer-side hold ----
         over15 = aged[aged["project_age"] > 15].copy()
@@ -273,6 +276,7 @@ def show():
                     stage_lead_time_df=stage_lead_time,
                     weighted_full_df=weighted,
                     top_owners_df=top_owners,
+                    top_owners_median_avg_days=top_owners_median_avg_days,
                     over15_internal_df=over15_internal,
                     over15_internal_count=over15_internal_count,
                     over15_external_count=over15_external_count,

@@ -96,7 +96,8 @@ def build_pdf(
     blended_total: float,
     stage_lead_time_df,
     weighted_full_df,       # full per-step output of weighted_lead_time(): stage_no, stage_label, stage_name, weighted_lead_time
-    top_owners_df,          # columns: assigned_to, total_days (pre-sorted, top 7, customer/_REQUESTOR rows excluded)
+    top_owners_df,          # columns: assigned_to, avg_days, count (min-task-count filtered, ranked by avg_days - TRUE per-task speed, not volume)
+    top_owners_median_avg_days: float,   # median avg_days across the min-task-count-filtered population, for a fair comparison
     over15_internal_df,
     over15_internal_count: int,
     over15_external_count: int,
@@ -114,18 +115,21 @@ def build_pdf(
       -- Where is the time going --
       4. Flow overview by stage
       5. Lead time by stage, ranked (the single biggest driver)
-      6-12. Stage deep-dives: which specific steps drive each stage's total
+      6-12. Stage deep-dives: which specific steps drive each stage's total (top 6 shown)
       -- The open backlog --
       13. Internal vs. external split (single stacked bar)
       14. The internally-delayed projects, by name
       -- People & process signals --
-      15. Top 7 lead-time contributors by assigned_to (internal only)
+      15. Slowest average task duration by assignee (min task count, NOT total volume)
       16. Rework signal (occurrence histogram)
       17. What this suggests
       Appendix: per-project variance table
-    'Total days impact' / Pareto is deliberately dropped - it's dominated by
-    step frequency, not step duration, so it doesn't actually show where time
-    is lost."""
+    'Total days impact' / Pareto is deliberately dropped for steps, and the
+    person-level chart deliberately ranks by AVERAGE days per task rather than
+    total days summed, for the same reason: a high-volume-but-fast person
+    (e.g. someone who touches nearly every project but is quick on each task)
+    would otherwise look like the biggest problem purely because of volume,
+    not because they're actually slow."""
     buf = io.BytesIO()
     c = pdf.new_canvas(buf)
 
@@ -182,13 +186,16 @@ def build_pdf(
     pdf.add_chart_page(c, "Lead Time by Stage - The Single Biggest Driver", fig)
     c.showPage()
 
-    # ---- Stage deep-dives: which specific steps drive each stage's total ----
+    # ---- Stage deep-dives: which specific steps drive each stage's total (top 7, non-zero only) ----
     for _, stage_row in stage_lead_time_df.sort_values("stage_lead_time", ascending=False).iterrows():
         stage_no, stage_label = stage_row["stage_no"], stage_row["stage_label"]
         stage_steps = (
             weighted_full_df[weighted_full_df["stage_no"] == stage_no]
             .sort_values("weighted_lead_time", ascending=False)
         )
+        # Drop anything that rounds to 0.0 at the chart's own 1-decimal display -
+        # a bar and a crowded x-axis label for a value too small to read isn't useful.
+        stage_steps = stage_steps[stage_steps["weighted_lead_time"].round(1) > 0].head(7)
         if len(stage_steps) < 2:
             continue  # a single-step stage has nothing to "deep dive" into
         fig = nc.ranked_bar(stage_steps["stage_name"], stage_steps["weighted_lead_time"],
@@ -221,9 +228,11 @@ def build_pdf(
     pdf.add_section_page(c, "People & Process Signals")
     c.showPage()
 
-    fig = nc.ranked_bar(top_owners_df["assigned_to"], top_owners_df["total_days"],
-                        title="", ylabel="Total lead-time contribution (days)", color=px.theme.GOLD)
-    pdf.add_chart_page(c, "Lead-Time Delivery Is Concentrated in a Small Group", fig)
+    fig = nc.ranked_bar(top_owners_df["assigned_to"], top_owners_df["avg_days"],
+                        title="", ylabel="Average days per task", color=px.theme.GOLD)
+    pdf.add_chart_page(
+        c, "Slowest Average Task Duration by Assignee (min. 10 tasks - not total volume)", fig,
+    )
     c.showPage()
 
     fig = nc.occurrence_histogram(rework_occurrence_counts, title="")
@@ -233,9 +242,8 @@ def build_pdf(
     c.showPage()
 
     top_name = str(top_owners_df.iloc[0]["assigned_to"]).split(" (")[0]
-    top_days = top_owners_df.iloc[0]["total_days"]
-    second_days = top_owners_df.iloc[1]["total_days"] if len(top_owners_df) > 1 else 0
-    ratio = f"{top_days / second_days:.1f}x" if second_days else "far more than"
+    top_avg = top_owners_df.iloc[0]["avg_days"]
+    avg_ratio = f"{top_avg / top_owners_median_avg_days:.1f}x" if top_owners_median_avg_days else "notably more than"
 
     pdf.add_bullets_page(
         c, "What This Suggests",
@@ -245,8 +253,9 @@ def build_pdf(
             "The aged open-project backlog looks alarming until it's split: the vast majority are "
             "simply waiting on the customer. Only a small, specific group is genuinely stuck "
             "internally - see the named list above.",
-            f"Lead-time delivery is concentrated: {top_name} carries {ratio} the load of the next "
-            "highest contributor - worth understanding whether that's a capacity risk.",
+            f"{top_name} averages {top_avg:.1f} days per task - {avg_ratio} the typical task "
+            "duration among staff with a comparable workload. This is a per-task speed signal, not "
+            "a volume one, so it's worth a direct look rather than assumed from raw activity.",
             f"'{rework_step_name}' recurring 2+ times on {rework_recurrence_pct:.0f}% of projects is a "
             "possible rework/first-pass-yield signal worth investigating at the source.",
         ],
