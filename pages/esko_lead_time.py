@@ -229,8 +229,20 @@ def show():
         top_owners_median_avg_days = float(owner_stats_filtered["avg_days"].median()) if len(owner_stats_filtered) else 0.0
 
         # ---- Open projects over 15 days: internal vs customer-side hold ----
+        # "Pending on customer" is TWO signals, combined with OR:
+        #   (a) the pending task's NAME contains both "customer" and "approval" - this is a real
+        #       customer-approval gate regardless of who happens to be assigned to shepherd it
+        #       (an internal CS team member sometimes is), and
+        #   (b) the pending task is literally assigned to _REQUESTOR - catches genuine
+        #       customer-side data-entry steps (e.g. "Customer Requirement", "Update Project
+        #       Input") that aren't named "...Approval" but are still sitting with the customer.
+        # Checking only (a) would wrongly reclassify those as "internal"; checking only (b) would
+        # miss the case this whole rule exists for - an internal person doing approval-named work.
         over15 = aged[aged["project_age"] > 15].copy()
-        over15["is_external"] = over15["pending_owner"].str.contains("REQUESTOR", case=False, na=False)
+        step_lower = over15["pending_step"].str.lower()
+        is_customer_approval_task = step_lower.str.contains("customer") & step_lower.str.contains("approval")
+        is_assigned_to_requestor = over15["pending_owner"].str.contains("REQUESTOR", case=False, na=False)
+        over15["is_external"] = is_customer_approval_task | is_assigned_to_requestor
         over15_internal = over15.loc[~over15["is_external"]].sort_values("project_age", ascending=False)
         over15_internal_count = len(over15_internal)
         over15_external_count = int(over15["is_external"].sum())
