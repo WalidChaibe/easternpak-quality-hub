@@ -74,20 +74,51 @@ def stage_owner_grouped_bar(stage_labels, owner_series: dict, title="Lead Time b
     return fig
 
 
-def ageing_stacked_bar(bucket_labels, stage_series: dict, title="Ageing Buckets, Stacked by Stage"):
+def single_stacked_bar(segments: list, title="", ylabel=""):
+    """One horizontal bar, stacked into 2+ colored segments - for showing a
+    single pool split into parts (e.g. 511 aged open projects: how many are
+    stuck on the customer vs stuck internally). segments: list of (label, value, color).
+    Communicates 'this is one pool, mostly one color' far more viscerally than
+    two separate side-by-side bars or KPI cards."""
     fig, ax = theme.new_content_figure()
-    x = np.arange(len(bucket_labels))
-    bottom = np.zeros(len(bucket_labels))
-    for i, (stage, vals) in enumerate(stage_series.items()):
-        vals = np.array(vals, dtype=float)
-        ax.bar(x, vals, bottom=bottom, width=0.6, label=stage,
-               color=theme.PALETTE_15[i % len(theme.PALETTE_15)])
-        bottom += vals
-    ax.set_xticks(x)
-    ax.set_xticklabels(bucket_labels)
-    ax.set_ylabel("Open project count")
+    total = sum(v for _, v, _ in segments)
+    left = 0
+    for label, value, color in segments:
+        ax.barh([0], [value], left=left, height=0.5, color=color,
+                label=f"{label} ({value:,} - {value/total:.0%})")
+        # value label centered in its own segment, white text if segment is wide enough
+        if value / total > 0.06:
+            ax.text(left + value / 2, 0, f"{value:,}", ha="center", va="center",
+                    fontsize=13, color="white", fontweight="bold")
+        left += value
+    ax.set_xlim(0, total)
+    ax.set_ylim(-1, 1)
+    ax.set_yticks([])
+    ax.set_xlabel(ylabel)
     theme.clean_axes(ax)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=4, frameon=False)
+    ax.spines["left"].set_visible(False)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25), ncol=len(segments), frameon=False, fontsize=11)
+    ax.set_title(title, fontsize=14, color=theme.NAPCO_BLUE, fontweight="bold", loc="left")
+    fig.tight_layout()
+    return fig
+
+
+def occurrence_histogram(counts, title="", xlabel="Occurrences per project", ylabel="Number of projects"):
+    """Histogram of how many times a step recurs within a single project -
+    e.g. Technical Approval happening 1x vs 10x on the same project. Shows the
+    actual SHAPE of a rework signal (rare outlier vs. common pattern), which a
+    single 'up to 10x' headline number can't convey."""
+    fig, ax = theme.new_content_figure()
+    max_val = int(max(counts)) if len(counts) else 1
+    bins = np.arange(1, max_val + 2) - 0.5
+    n, bin_edges, patches = ax.hist(counts, bins=bins, color=theme.NAPCO_BLUE, rwidth=0.7)
+    ax.set_xticks(range(1, max_val + 1))
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    theme.clean_axes(ax)
+    for count, edge in zip(n, bin_edges):
+        if count > 0:
+            ax.text(edge + 0.5, count + max(n) * 0.01, f"{int(count)}", ha="center", va="bottom", fontsize=10, color="#4D4D4D")
     ax.set_title(title, fontsize=14, color=theme.NAPCO_BLUE, fontweight="bold", loc="left")
     fig.tight_layout()
     return fig

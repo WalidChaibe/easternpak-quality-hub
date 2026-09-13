@@ -226,21 +226,49 @@ def show():
         over15_internal_count = len(over15_internal)
         over15_external_count = int(over15["is_external"].sum())
 
+        # ---- Open-project age distribution, standardized 0-3/3-15/15-30/30+ buckets ----
+        age_bucket_labels = ["0-3 days", "3-15 days", "15-30 days", "30+ days"]
+        age_bins = [-1, 2, 14, 29, float("inf")]
+        aged_bucketed = aged.copy()
+        aged_bucketed["proj_age_bucket"] = pd.cut(
+            aged_bucketed["project_age"], bins=age_bins, labels=age_bucket_labels
+        )
+        age_dist = aged_bucketed["proj_age_bucket"].value_counts().reindex(age_bucket_labels).fillna(0)
+
+        # ---- Slide 3: true system lead time, two lenses (closed-only vs. blended) ----
+        blended_tasks = pd.concat([
+            completed_mapped[completed_mapped["task_completed"].notna()],
+            open_mapped[open_mapped["task_completed"].notna()],
+        ], ignore_index=True)
+        blended_step_metrics = per_step_metrics(blended_tasks)
+        blended_weighted = weighted_lead_time(blended_step_metrics, blended_tasks, basis="global")
+        blended_total = blended_weighted.attrs["total_system_lead_time"]
+
+        # ---- Rework signal: how often the single busiest step recurs per project ----
+        busiest_step_name = step_metrics.sort_values("count", ascending=False).iloc[0]["stage_name"]
+        rework_occurrences = (
+            completed_mapped[completed_mapped["stage_name"] == busiest_step_name]
+            .groupby("project_name").size().values
+        )
+
         col_pdf, col_xl1, col_xl2, col_xl3 = st.columns(4)
         with col_pdf:
             if st.button("📥 Generate PDF report"):
                 buf = build_pdf(
-                    kpis=kpis,
+                    closed_project_count=completed_mapped["project_name"].nunique(),
+                    closed_weighted_lead_time=total_system_lead_time,
+                    open_age_bucket_labels=age_bucket_labels,
+                    open_age_bucket_counts=age_dist.values.tolist(),
+                    closed_only_total=total_system_lead_time,
+                    blended_total=blended_total,
                     stage_lead_time_df=stage_lead_time,
-                    step_metrics_df=step_metrics,
-                    per_project_df=per_project,
-                    open_by_stage_df=open_stage_counts,
-                    open_by_owner_df=open_owner_counts,
-                    ageing_df=ageing,
                     top_owners_df=top_owners,
                     over15_internal_df=over15_internal,
                     over15_internal_count=over15_internal_count,
                     over15_external_count=over15_external_count,
+                    rework_step_name=busiest_step_name,
+                    rework_occurrence_counts=rework_occurrences,
+                    per_project_df=per_project,
                     logo_path="static/napco_logo.png",
                 )
                 st.download_button("Download esko_lead_time_report.pdf", buf,

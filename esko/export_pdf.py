@@ -232,6 +232,116 @@ def add_kpi_page(c: canvas.Canvas, title, kpis: dict, footnote: str = None):
 
 
 
+def add_split_page(c: canvas.Canvas, title, left_title, left_stats: list, right_title, right_fig):
+    """Two halves side by side, sharing one title bar: left is a small stack of
+    big-number stat cards (value, label), right is a chart image. Used for
+    'closed vs. open at a glance' - the two populations are genuinely different
+    kinds of data (a rate for one, a distribution for the other), so putting
+    them on one page as a comparison reads better than two separate pages."""
+    c.setFillColor(WHITE)
+    c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
+    _title_bar(c, title)
+
+    mid_x = PAGE_W / 2
+    col_pad = 24
+
+    # Left half: sub-heading + stacked stat cards
+    c.setFont("Helvetica-Bold", 16)
+    c.setFillColor(TITLE_BLUE)
+    c.drawString(BOX_X, _y_from_top(BOX_Y_FROM_TOP), left_title)
+
+    card_w = mid_x - BOX_X - col_pad
+    card_h = 110
+    gap = 20
+    for i, (value, label) in enumerate(left_stats):
+        y_top = BOX_Y_FROM_TOP + 40 + i * (card_h + gap)
+        y = _y_from_top(y_top + card_h)
+        c.setFillColor(LIGHT_BLUE)
+        c.setStrokeColor(NAPCO_BLUE)
+        c.roundRect(BOX_X, y, card_w, card_h, 8, stroke=1, fill=1)
+        c.setFont("Helvetica-Bold", 30)
+        c.setFillColor(NAPCO_BLUE)
+        c.drawCentredString(BOX_X + card_w / 2, y + card_h - 48, str(value))
+        c.setFont("Helvetica", 13)
+        c.setFillColor(DARK_TEXT)
+        c.drawCentredString(BOX_X + card_w / 2, y + card_h - 75, label)
+
+    # Divider between halves
+    c.setStrokeColor(colors.HexColor("#DDDDDD"))
+    c.setLineWidth(1)
+    c.line(mid_x, _y_from_top(BOX_Y_FROM_TOP + BOX_H), mid_x, _y_from_top(BOX_Y_FROM_TOP))
+
+    # Right half: sub-heading + chart
+    c.setFont("Helvetica-Bold", 16)
+    c.setFillColor(TITLE_BLUE)
+    c.drawString(mid_x + col_pad, _y_from_top(BOX_Y_FROM_TOP), right_title)
+
+    png_buf = _save_fig_png_bytes(right_fig)
+    right_box_w = mid_x - col_pad - 20
+    box_y = _y_from_top(BOX_Y_FROM_TOP + 30 + BOX_H - 30)
+    c.drawImage(ImageReader(png_buf), mid_x + col_pad, box_y, width=right_box_w, height=BOX_H - 30,
+                preserveAspectRatio=True, anchor="c", mask="auto")
+
+
+def add_headline_comparison_page(c: canvas.Canvas, title, cards: list, note: str = None):
+    """A small number (2-3) of large, prominent stat cards side by side, for a
+    single comparison the whole page exists to make (e.g. two different ways
+    of computing 'total system lead time', and why they differ)."""
+    c.setFillColor(WHITE)
+    c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
+    _title_bar(c, title)
+
+    n = len(cards)
+    gap = 40
+    card_w = (BOX_W - gap * (n - 1)) / n
+    card_h = 200
+    start_y_top = BOX_Y_FROM_TOP + 60
+
+    for i, (value, label, sublabel) in enumerate(cards):
+        x = BOX_X + i * (card_w + gap)
+        y = _y_from_top(start_y_top + card_h)
+        c.setFillColor(LIGHT_BLUE)
+        c.setStrokeColor(NAPCO_BLUE)
+        c.roundRect(x, y, card_w, card_h, 10, stroke=1, fill=1)
+        c.setFont("Helvetica-Bold", 42)
+        c.setFillColor(NAPCO_BLUE)
+        c.drawCentredString(x + card_w / 2, y + card_h - 75, str(value))
+        c.setFont("Helvetica-Bold", 15)
+        c.setFillColor(DARK_TEXT)
+        c.drawCentredString(x + card_w / 2, y + card_h - 110, label)
+        if sublabel:
+            c.setFont("Helvetica-Oblique", 11)
+            c.setFillColor(colors.HexColor("#6B7280"))
+            c.drawCentredString(x + card_w / 2, y + card_h - 130, sublabel)
+
+    if note:
+        c.setFont("Helvetica-Oblique", 11)
+        c.setFillColor(colors.HexColor("#6B7280"))
+        max_width = PAGE_W - 2 * BOX_X
+        note_y_top = start_y_top + card_h + 40
+        for i, line in enumerate(_wrap_text(note, "Helvetica-Oblique", 11, max_width, c)):
+            c.drawString(BOX_X, _y_from_top(note_y_top + i * 15), line)
+
+
+def add_bullets_page(c: canvas.Canvas, title, bullets: list):
+    """Simple bulleted text page, for a closing 'what this suggests' summary."""
+    c.setFillColor(WHITE)
+    c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
+    _title_bar(c, title)
+
+    y_top = BOX_Y_FROM_TOP + 30
+    max_width = BOX_W - 30
+    for bullet in bullets:
+        c.setFillColor(RED_ACCENT)
+        c.circle(BOX_X + 4, _y_from_top(y_top + 6), 3, fill=1, stroke=0)
+        c.setFont("Helvetica", 14)
+        c.setFillColor(DARK_TEXT)
+        lines = _wrap_text(bullet, "Helvetica", 14, max_width, c)
+        for i, line in enumerate(lines):
+            c.drawString(BOX_X + 18, _y_from_top(y_top + i * 20), line)
+        y_top += len(lines) * 20 + 26
+
+
 def add_chart_page(c: canvas.Canvas, title, fig):
     c.setFillColor(WHITE)
     c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
