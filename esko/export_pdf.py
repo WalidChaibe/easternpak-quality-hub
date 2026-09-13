@@ -20,10 +20,30 @@ from reportlab.lib.pagesizes import landscape
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import Table, TableStyle
 
 from esko import napco_theme as theme
-from esko.export_pptx import _save_fig_png
+import io as _io
+
+
+def _save_fig_png_bytes(fig, dpi=300):
+    """PDF-specific chart rasterization, matching the reference template's
+    fig_to_png_bytes exactly: bbox_inches='tight' crops to content (so a
+    chart with a short title/no legend doesn't carry dead whitespace), and
+    the drawImage call below uses preserveAspectRatio=True to center whatever
+    size comes out without distorting it.
+
+    NOT shared with export_pptx.py's _save_fig_png, which deliberately avoids
+    bbox_inches='tight' for a different reason documented there (the PPTX
+    content box needs the saved image's aspect ratio to exactly match the
+    box's own, since it doesn't center/pad - cropping there would drift the
+    two apart again, re-introducing the letterboxing bug already fixed for
+    that pathway). Two different embedding strategies, so two functions."""
+    buf = _io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
+    buf.seek(0)
+    return buf
 
 # Match the PPTX slide dimensions exactly (13.333in x 7.5in, 16:9) so every
 # chart figure (sized to CONTENT_BOX_FIGSIZE) drops in with the same
@@ -37,6 +57,7 @@ BOX_W = 880
 BOX_H = 408
 
 NAPCO_BLUE = colors.HexColor(theme.NAPCO_BLUE)
+TITLE_BLUE = colors.HexColor("#0E5E86")   # matches the reference PDF template's heading color exactly
 LIGHT_BLUE = colors.HexColor(theme.LIGHT_BLUE)
 RED_ACCENT = colors.HexColor(theme.RED_ACCENT)
 BLUE_ACCENT = colors.HexColor(theme.BLUE_ACCENT)
@@ -72,7 +93,7 @@ def _wrap_text(text, font_name, font_size, max_width, c):
 
 def _title_bar(c: canvas.Canvas, title_text: str):
     c.setFont("Helvetica-Bold", 22)
-    c.setFillColor(NAPCO_BLUE)
+    c.setFillColor(TITLE_BLUE)
     c.drawString(40, _y_from_top(20 + 22), title_text)
 
     rule_y = _y_from_top(64)
@@ -88,37 +109,56 @@ def _new_page(c: canvas.Canvas):
 
 
 def add_cover_page(c: canvas.Canvas, title, subtitle, date_str=None, logo_path=None):
-    c.setFillColor(WHITE)
-    c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
+    """Exact port of the reference draw_cover_slide(): logo + blue bar band
+    sits near the TOP of the page (not the bottom), the vertical red bar only
+    spans that top band's height, and title/rule/subtitle are centered as a
+    group in the remaining space between the band and the date line."""
+    W, H = PAGE_W, PAGE_H
 
-    # red vertical bar, left edge
-    c.setFillColor(RED_ACCENT)
-    c.rect(0, 0, 4, PAGE_H, stroke=0, fill=1)
-
-    # blue bar near bottom of logo band
-    bar_y = 125
-    c.setFillColor(BLUE_ACCENT)
-    c.rect(18, bar_y, PAGE_W - 18, 3, stroke=0, fill=1)
+    c.setFillColorRGB(1, 1, 1)
+    c.rect(0, 0, W, H, fill=1, stroke=0)
 
     if logo_path and os.path.exists(logo_path):
-        c.drawImage(logo_path, 18, bar_y + 5, width=280, height=110,
-                     preserveAspectRatio=True, mask="auto")
+        c.drawImage(logo_path, 18, H - 115, width=280, height=110,
+                    preserveAspectRatio=True, mask="auto")
 
-    c.setFont("Helvetica-Bold", 44)
-    c.setFillColor(NAPCO_BLUE)
-    c.drawCentredString(PAGE_W / 2, PAGE_H - 3.2 * inch, title)
+    # Blue horizontal bar - from the logo's left edge to the right edge of the page
+    line_y = H - 125
+    logo_left = 18
+    c.setFillColor(BLUE_ACCENT)
+    c.rect(logo_left, line_y, W - logo_left, 4, fill=1, stroke=0)
 
+    # Thin vertical red bar - flush with the left edge, top down to the blue line only
     c.setFillColor(RED_ACCENT)
-    c.rect(80, PAGE_H - 4.25 * inch, PAGE_W - 160, 2, stroke=0, fill=1)
+    c.rect(0, line_y, 4, H - line_y, fill=1, stroke=0)
 
-    c.setFont("Helvetica-Oblique", 20)
+    # Title block centered in the remaining space (below the blue line, above the date)
+    remaining_center = (H - 125 + 50) / 2
+    title_font_size = 44
+    subtitle_font_size = 20
+    gap = 28
+
+    title_y = remaining_center + gap + 10
+    c.setFillColor(TITLE_BLUE)
+    c.setFont("Helvetica-Bold", title_font_size)
+    title_w = c.stringWidth(title, "Helvetica-Bold", title_font_size)
+    c.drawString((W - title_w) / 2, title_y, title)
+
+    rule_y = title_y - gap
+    c.setFillColor(RED_ACCENT)
+    c.rect(80, rule_y, W - 160, 2, fill=1, stroke=0)
+
+    sub_y = rule_y - gap - 4
     c.setFillColor(colors.HexColor("#555555"))
-    c.drawCentredString(PAGE_W / 2, PAGE_H - 4.55 * inch, subtitle)
+    c.setFont("Helvetica-Oblique", subtitle_font_size)
+    sub_w = c.stringWidth(subtitle, "Helvetica-Oblique", subtitle_font_size)
+    c.drawString((W - sub_w) / 2, sub_y, subtitle)
 
     if date_str:
         c.setFont("Helvetica-Oblique", 14)
         c.setFillColor(colors.HexColor("#888888"))
-        c.drawRightString(PAGE_W - 40, PAGE_H - 0.55 * inch, date_str)
+        date_w = c.stringWidth(date_str, "Helvetica-Oblique", 14)
+        c.drawString(W - date_w - 40, 28, date_str)
 
 
 
@@ -197,10 +237,10 @@ def add_chart_page(c: canvas.Canvas, title, fig):
     c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
     _title_bar(c, title)
 
-    png_path = _save_fig_png(fig)
+    png_buf = _save_fig_png_bytes(fig)
     box_y = _y_from_top(BOX_Y_FROM_TOP + BOX_H)
-    c.drawImage(png_path, BOX_X, box_y, width=BOX_W, height=BOX_H, preserveAspectRatio=False)
-    os.unlink(png_path)
+    c.drawImage(ImageReader(png_buf), BOX_X, box_y, width=BOX_W, height=BOX_H,
+                preserveAspectRatio=True, anchor="c", mask="auto")
 
 
 
