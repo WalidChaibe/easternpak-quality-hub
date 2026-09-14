@@ -79,20 +79,28 @@ def single_stacked_bar(segments: list, title="", ylabel=""):
     single pool split into parts (e.g. 511 aged open projects: how many are
     stuck on the customer vs stuck internally). segments: list of (label, value, color).
     Communicates 'this is one pool, mostly one color' far more viscerally than
-    two separate side-by-side bars or KPI cards."""
+    two separate side-by-side bars or KPI cards. Every segment's count is always
+    shown - wide segments get a centered white label inside the bar; thin
+    segments (where inside text wouldn't fit or be legible) get their label
+    placed just above the bar with a short leader line pointing to it, so a
+    tiny sliver is never left unlabeled."""
     fig, ax = theme.new_content_figure()
     total = sum(v for _, v, _ in segments)
     left = 0
     for label, value, color in segments:
         ax.barh([0], [value], left=left, height=0.5, color=color,
                 label=f"{label} ({value:,} - {value/total:.0%})")
-        # value label centered in its own segment, white text if segment is wide enough
-        if value / total > 0.06:
-            ax.text(left + value / 2, 0, f"{value:,}", ha="center", va="center",
+        mid = left + value / 2
+        if value / total > 0.08:
+            ax.text(mid, 0, f"{value:,}", ha="center", va="center",
                     fontsize=13, color="white", fontweight="bold")
+        else:
+            ax.annotate(f"{value:,}", xy=(mid, 0.25), xytext=(mid, 0.75),
+                        ha="center", va="bottom", fontsize=13, color=theme.DARK_TEXT, fontweight="bold",
+                        arrowprops=dict(arrowstyle="-", color="#888888", lw=1))
         left += value
     ax.set_xlim(0, total)
-    ax.set_ylim(-1, 1)
+    ax.set_ylim(-1, 1.1)
     ax.set_yticks([])
     ax.set_xlabel(ylabel)
     theme.clean_axes(ax)

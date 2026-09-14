@@ -94,42 +94,37 @@ def build_pdf(
     open_age_bucket_counts: list,
     closed_only_total: float,
     blended_total: float,
+    closed_only_median_project_days: float,
+    blended_median_project_days: float,
     stage_lead_time_df,
-    weighted_full_df,       # full per-step output of weighted_lead_time(): stage_no, stage_label, stage_name, weighted_lead_time
-    top_owners_df,          # columns: assigned_to, avg_days, count (min-task-count filtered, ranked by avg_days - TRUE per-task speed, not volume)
-    top_owners_median_avg_days: float,   # median avg_days across the min-task-count-filtered population, for a fair comparison
+    weighted_full_df,
+    top_owners_df,
     over15_internal_df,
     over15_internal_count: int,
     over15_external_count: int,
     rework_step_name: str,
     rework_occurrence_counts,
-    rework_recurrence_pct: float,
-    per_project_df,
     logo_path=None,
     subtitle="Lead-Time Analytics",
 ) -> io.BytesIO:
-    """Redesigned structure - a narrative, not a chart dump:
+    """Structure:
       1. Cover
-      2. At a glance: closed vs. open (split page)
-      3. True system lead time: two lenses (closed-only vs. blended)
+      2. Analysis Overview - Closed vs Open (single stat panel + chart)
+      3. Weighted Lead Time - Closed vs Blended View (stage-weighted lens)
+      4. Median Project Lead Time - Closed vs Blended View (project-level lens,
+         blended = closed projects' actual lead time + open projects' current age)
       -- Where is the time going --
-      4. Flow overview by stage
-      5. Lead time by stage, ranked (the single biggest driver)
-      6-12. Stage deep-dives: which specific steps drive each stage's total (top 6 shown)
-      -- The open backlog --
-      13. Internal vs. external split (single stacked bar)
-      14. The internally-delayed projects, by name
-      -- People & process signals --
-      15. Slowest average task duration by assignee (min task count, NOT total volume)
-      16. Rework signal (occurrence histogram)
-      17. What this suggests
-      Appendix: per-project variance table
-    'Total days impact' / Pareto is deliberately dropped for steps, and the
-    person-level chart deliberately ranks by AVERAGE days per task rather than
-    total days summed, for the same reason: a high-volume-but-fast person
-    (e.g. someone who touches nearly every project but is quick on each task)
-    would otherwise look like the biggest problem purely because of volume,
-    not because they're actually slow."""
+      5. Flow Overview - Weighted Lead Time by Stage (process order)
+      6. Flow Overview - Weighted Lead Time by Stage (sorted)
+      7-13. Stage N - <label> - Deep Dive (top 7, non-zero only)
+      -- The Open Backlog --
+      14. Status of Open Projects (single stacked bar, every segment labeled)
+      15. Internally Pending Open Projects (sorted oldest first)
+      -- People & Process Signals --
+      16. Average Task Duration by Assignee (min. 10 tasks)
+      17. Occurrences of '<step>' per Project
+    Titles are deliberately plain/descriptive, not conclusions - the numbers
+    and charts make the case, the title just says what's on the page."""
     buf = io.BytesIO()
     c = pdf.new_canvas(buf)
 
@@ -139,34 +134,52 @@ def build_pdf(
     )
     c.showPage()
 
-    # ---- Slide 2: at a glance ----
+    # ---- Slide 2: Analysis Overview ----
+    total_projects = closed_project_count + open_project_count
+    closed_pct = f"{closed_project_count / total_projects:.0%}" if total_projects else None
+    open_pct = f"{open_project_count / total_projects:.0%}" if total_projects else None
+
     fig = nc.ranked_bar(open_age_bucket_labels, open_age_bucket_counts,
                         title="", ylabel="Open project count", color=px.theme.NAPCO_BLUE, rotation=0)
-    pdf.add_split_page(
-        c, "At a Glance: Closed vs. Open Projects",
-        left_title="Closed Projects",
-        left_stats=[
-            (closed_project_count, "Projects analysed"),
-            (f"{closed_weighted_lead_time:.1f} d", "Weighted lead time"),
+    pdf.add_overview_page(
+        c, "Analysis Overview - Closed vs Open",
+        stats=[
+            (total_projects, "Total Projects", None),
+            (closed_project_count, "Projects Closed", closed_pct),
+            (open_project_count, "Projects Open", open_pct),
+            (f"{closed_weighted_lead_time:.1f} d", "Weighted Lead Time", None),
         ],
-        right_title="Open Projects - Age Distribution",
-        right_fig=fig,
-        right_subtitle=f"{open_project_count} open projects total",
+        fig=fig,
     )
     c.showPage()
 
-    # ---- Slide 3: true system lead time, two lenses ----
+    # ---- Slide 3: stage-weighted lens ----
     pdf.add_headline_comparison_page(
-        c, "True System Lead Time - Two Lenses",
+        c, "Weighted Lead Time - Closed vs Blended View",
         cards=[
             (f"{closed_only_total:.1f} d", "Closed-only view", "Projects that finished the full journey"),
             (f"{blended_total:.1f} d", "Blended view", "Every completed task, incl. work inside open projects"),
         ],
         note=(
-            "These differ because the blended view is dominated by common early-stage steps that "
-            "many open projects have already finished, while the closed-only view only reflects "
-            "projects that made it all the way through - including the slower later stages. Neither "
-            "number is 'more correct'; they answer different questions."
+            "Weighted view: each process stage's time is the average duration of its tasks, scaled "
+            "by how often that task actually occurs. Closed-only uses only finished projects; "
+            "blended also counts individually-completed tasks from projects that are still open."
+        ),
+    )
+    c.showPage()
+
+    # ---- Slide 4: project-level lens ----
+    pdf.add_headline_comparison_page(
+        c, "Median Project Lead Time - Closed vs Blended View",
+        cards=[
+            (f"{closed_only_median_project_days:.1f} d", "Closed-only view", "Median actual lead time, finished projects only"),
+            (f"{blended_median_project_days:.1f} d", "Blended view", "Also includes open projects' current age"),
+        ],
+        note=(
+            "Project-level view (different from the weighted view above): closed-only is the "
+            "median actual start-to-finish time for the 386 finished projects. Blended pools those "
+            "same finish times together with every open project's current age (days since creation, "
+            "since it hasn't finished yet) into one combined median."
         ),
     )
     c.showPage()
@@ -183,7 +196,7 @@ def build_pdf(
     lt_sorted = stage_lead_time_df.sort_values("stage_lead_time", ascending=False)
     fig = nc.ranked_bar(lt_sorted["stage_label"], lt_sorted["stage_lead_time"],
                         title="", color=px.theme.NAPCO_BLUE)
-    pdf.add_chart_page(c, "Lead Time by Stage - The Single Biggest Driver", fig)
+    pdf.add_chart_page(c, "Flow Overview - Weighted Lead Time by Stage (sorted)", fig)
     c.showPage()
 
     # ---- Stage deep-dives: which specific steps drive each stage's total (top 7, non-zero only) ----
@@ -200,10 +213,10 @@ def build_pdf(
             continue  # a single-step stage has nothing to "deep dive" into
         fig = nc.ranked_bar(stage_steps["stage_name"], stage_steps["weighted_lead_time"],
                             title="", ylabel="Weighted lead time (days)", color=px.theme.NAPCO_BLUE)
-        pdf.add_chart_page(c, f"Deep Dive: {stage_label} - Which Step Is Driving It", fig)
+        pdf.add_chart_page(c, f"Stage {int(stage_no)} - {stage_label} - Deep Dive", fig)
         c.showPage()
 
-    # ---- The open backlog ----
+    # ---- The Open Backlog ----
     pdf.add_section_page(c, "The Open Backlog")
     c.showPage()
 
@@ -214,12 +227,12 @@ def build_pdf(
         ],
         title="", ylabel="Open projects aged over 15 days",
     )
-    pdf.add_chart_page(c, "95% of the Aged Backlog Is Waiting on the Customer, Not on Us", fig)
+    pdf.add_chart_page(c, "Status of Open Projects", fig)
     c.showPage()
 
     over15_cols = ["project_name", "pending_stage_label", "pending_owner", "project_age"]
     pdf.add_table_page(
-        c, "The 26 Projects Actually Stuck Internally (sorted oldest first)",
+        c, "Internally Pending Open Projects (sorted oldest first)",
         over15_internal_df[over15_cols],
     )
     c.showPage()
@@ -230,47 +243,11 @@ def build_pdf(
 
     fig = nc.ranked_bar(top_owners_df["assigned_to"], top_owners_df["avg_days"],
                         title="", ylabel="Average days per task", color=px.theme.GOLD)
-    pdf.add_chart_page(
-        c, "Slowest Average Task Duration by Assignee (min. 10 tasks - not total volume)", fig,
-    )
+    pdf.add_chart_page(c, "Average Task Duration by Assignee (min. 10 tasks)", fig)
     c.showPage()
 
     fig = nc.occurrence_histogram(rework_occurrence_counts, title="")
-    pdf.add_chart_page(
-        c, f"'{rework_step_name}' Recurs More Than Once on {rework_recurrence_pct:.0f}% of Projects", fig,
-    )
-    c.showPage()
-
-    top_name = str(top_owners_df.iloc[0]["assigned_to"]).split(" (")[0]
-    top_avg = top_owners_df.iloc[0]["avg_days"]
-    avg_ratio = f"{top_avg / top_owners_median_avg_days:.1f}x" if top_owners_median_avg_days else "notably more than"
-
-    pdf.add_bullets_page(
-        c, "What This Suggests",
-        bullets=[
-            "Customer Artwork Approval is the single largest driver of lead time - and it's the "
-            "customer's clock, not ours. Worth a conversation about setting a customer-facing SLA.",
-            "The aged open-project backlog looks alarming until it's split: the vast majority are "
-            "simply waiting on the customer. Only a small, specific group is genuinely stuck "
-            "internally - see the named list above.",
-            f"{top_name} averages {top_avg:.1f} days per task - {avg_ratio} the typical task "
-            "duration among staff with a comparable workload. This is a per-task speed signal, not "
-            "a volume one, so it's worth a direct look rather than assumed from raw activity.",
-            f"'{rework_step_name}' recurring 2+ times on {rework_recurrence_pct:.0f}% of projects is a "
-            "possible rework/first-pass-yield signal worth investigating at the source.",
-        ],
-    )
-    c.showPage()
-
-    # ---- Appendix ----
-    pdf.add_section_page(c, "Appendix")
-    c.showPage()
-
-    table_cols = ["project_name", "sys_lead_time", "calc_lead_time", "variance", "task_count"]
-    pdf.add_table_page(
-        c, "Per-Project Variance (idle/queue time, descending, top 20 shown)",
-        per_project_df[table_cols], max_rows=20,
-    )
+    pdf.add_chart_page(c, f"Occurrences of '{rework_step_name}' per Project", fig)
     # no trailing showPage() - this is the last page
 
     return pdf.finish(c, buf)

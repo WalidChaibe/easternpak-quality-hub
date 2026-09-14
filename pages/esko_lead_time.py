@@ -274,6 +274,14 @@ def show():
         rework_occurrences = rework_by_project.values
         rework_recurrence_pct = 100.0 * (rework_by_project > 1).sum() / len(rework_by_project) if len(rework_by_project) else 0.0
 
+        # ---- Slide 4: median project lead time, two lenses (project-level, not stage-weighted) ----
+        # Closed-only = median calc_lead_time (actual start-to-finish) across the 386 closed projects.
+        # Blended = those same finish times pooled together with every open project's CURRENT age
+        # (days since creation, since it hasn't finished yet) into one combined median.
+        closed_only_median_project_days = float(per_project["calc_lead_time"].median())
+        blended_project_pool = pd.concat([per_project["calc_lead_time"], aged["project_age"]], ignore_index=True)
+        blended_median_project_days = float(blended_project_pool.median())
+
         col_pdf, col_xl1, col_xl2, col_xl3 = st.columns(4)
         with col_pdf:
             if st.button("📥 Generate PDF report"):
@@ -285,17 +293,16 @@ def show():
                     open_age_bucket_counts=age_dist.values.tolist(),
                     closed_only_total=total_system_lead_time,
                     blended_total=blended_total,
+                    closed_only_median_project_days=closed_only_median_project_days,
+                    blended_median_project_days=blended_median_project_days,
                     stage_lead_time_df=stage_lead_time,
                     weighted_full_df=weighted,
                     top_owners_df=top_owners,
-                    top_owners_median_avg_days=top_owners_median_avg_days,
                     over15_internal_df=over15_internal,
                     over15_internal_count=over15_internal_count,
                     over15_external_count=over15_external_count,
                     rework_step_name=busiest_step_name,
                     rework_occurrence_counts=rework_occurrences,
-                    rework_recurrence_pct=rework_recurrence_pct,
-                    per_project_df=per_project,
                     logo_path="static/napco_logo.png",
                 )
                 st.download_button("Download esko_lead_time_report.pdf", buf,

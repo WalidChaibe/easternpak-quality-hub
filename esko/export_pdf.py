@@ -232,6 +232,47 @@ def add_kpi_page(c: canvas.Canvas, title, kpis: dict, footnote: str = None):
 
 
 
+def add_overview_page(c: canvas.Canvas, title, stats: list, fig, stats_panel_width_frac: float = 0.32):
+    """Single stat panel on the left (one bordered rectangle, stats stacked
+    inside it top to bottom, each with an optional percentage), a larger
+    chart taking up the rest of the width on the right. No dividing line, no
+    sub-headings on either side - just one title bar and two zones."""
+    c.setFillColor(WHITE)
+    c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
+    _title_bar(c, title)
+
+    panel_w = (PAGE_W - 2 * BOX_X) * stats_panel_width_frac
+    panel_x = BOX_X
+    panel_y = _y_from_top(BOX_Y_FROM_TOP + BOX_H)
+    panel_h = BOX_H
+
+    c.setFillColor(LIGHT_BLUE)
+    c.setStrokeColor(NAPCO_BLUE)
+    c.roundRect(panel_x, panel_y, panel_w, panel_h, 10, stroke=1, fill=1)
+
+    row_h = panel_h / len(stats)
+    for i, (value, label, pct) in enumerate(stats):
+        row_top_y = panel_y + panel_h - i * row_h
+        row_center_y = row_top_y - row_h / 2
+        c.setFont("Helvetica-Bold", 26)
+        c.setFillColor(NAPCO_BLUE)
+        value_text = f"{value}" + (f"  ({pct})" if pct else "")
+        c.drawCentredString(panel_x + panel_w / 2, row_center_y + 8, value_text)
+        c.setFont("Helvetica", 12)
+        c.setFillColor(DARK_TEXT)
+        c.drawCentredString(panel_x + panel_w / 2, row_center_y - 14, label)
+        if i > 0:
+            c.setStrokeColor(colors.HexColor("#BFD9E8"))
+            c.setLineWidth(0.75)
+            c.line(panel_x + 16, row_top_y, panel_x + panel_w - 16, row_top_y)
+
+    chart_x = panel_x + panel_w + 30
+    chart_w = PAGE_W - BOX_X - chart_x
+    png_buf = _save_fig_png_bytes(fig)
+    c.drawImage(ImageReader(png_buf), chart_x, panel_y, width=chart_w, height=panel_h,
+                preserveAspectRatio=True, anchor="c", mask="auto")
+
+
 def add_split_page(c: canvas.Canvas, title, left_title, left_stats: list, right_title, right_fig, right_subtitle: str = None):
     """Two halves side by side, sharing one title bar: left is a small stack of
     big-number stat cards (value, label), right is a chart image with an
