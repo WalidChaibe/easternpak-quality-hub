@@ -243,7 +243,12 @@ def add_overview_page(c: canvas.Canvas, title, stats: list, fig, stats_panel_wid
     with preserveAspectRatio, its actual rendered height is usually smaller
     than the box, centered within it. Sizing the panel to the box instead of
     the true image size leaves the panel visibly taller than the chart and
-    off-center relative to it."""
+    off-center relative to it.
+
+    Style: white panel with a thin border and a small two-tone accent strip
+    at the top (echoing the title bar), not a solid pastel fill - reads as a
+    clean stat tile rather than a filled note box. Value/label text is
+    symmetrically centered within each row so divider spacing looks even."""
     c.setFillColor(WHITE)
     c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
     _title_bar(c, title)
@@ -266,23 +271,46 @@ def add_overview_page(c: canvas.Canvas, title, stats: list, fig, stats_panel_wid
     panel_h = rendered_h
     panel_y = chart_area_y + (chart_area_h - panel_h) / 2  # same vertical center as the chart
 
-    c.setFillColor(LIGHT_BLUE)
+    # White tile, thin border, subtle shadow-free flat look
+    c.setFillColor(WHITE)
     c.setStrokeColor(NAPCO_BLUE)
+    c.setLineWidth(1)
     c.roundRect(panel_x, panel_y, panel_w, panel_h, 10, stroke=1, fill=1)
 
-    row_h = panel_h / len(stats)
+    # Small two-tone accent strip inset at the top of the panel, echoing the title bar
+    accent_reserve = 22  # vertical space reserved for the strip, rows fill the space below it
+    accent_y = panel_y + panel_h - 14
+    accent_pad = 18
+    c.setFillColor(RED_ACCENT)
+    c.rect(panel_x + accent_pad, accent_y, 28, 2.5, stroke=0, fill=1)
+    c.setFillColor(BLUE_ACCENT)
+    c.rect(panel_x + accent_pad + 32, accent_y, panel_w - 2 * accent_pad - 32, 2.5, stroke=0, fill=1)
+
+    content_h = panel_h - accent_reserve
+    row_h = content_h / len(stats)
     for i, (value, label, pct) in enumerate(stats):
-        row_top_y = panel_y + panel_h - i * row_h
+        row_top_y = panel_y + content_h - i * row_h
         row_center_y = row_top_y - row_h / 2
+
         c.setFont("Helvetica-Bold", 26)
         c.setFillColor(NAPCO_BLUE)
-        value_text = f"{value}" + (f"  ({pct})" if pct else "")
-        c.drawCentredString(panel_x + panel_w / 2, row_center_y + 8, value_text)
+        value_w = c.stringWidth(str(value), "Helvetica-Bold", 26)
+        pct_text = f"  ({pct})" if pct else ""
+        pct_w = c.stringWidth(pct_text, "Helvetica", 13) if pct else 0
+        total_w = value_w + pct_w
+        start_x = panel_x + panel_w / 2 - total_w / 2
+        c.drawString(start_x, row_center_y + 9, str(value))
+        if pct:
+            c.setFont("Helvetica", 13)
+            c.setFillColor(colors.HexColor("#6B7280"))
+            c.drawString(start_x + value_w, row_center_y + 9, pct_text)
+
         c.setFont("Helvetica", 12)
         c.setFillColor(DARK_TEXT)
-        c.drawCentredString(panel_x + panel_w / 2, row_center_y - 14, label)
+        c.drawCentredString(panel_x + panel_w / 2, row_center_y - 11, label)
+
         if i > 0:
-            c.setStrokeColor(colors.HexColor("#BFD9E8"))
+            c.setStrokeColor(colors.HexColor("#E5E7EB"))
             c.setLineWidth(0.75)
             c.line(panel_x + 16, row_top_y, panel_x + panel_w - 16, row_top_y)
 
