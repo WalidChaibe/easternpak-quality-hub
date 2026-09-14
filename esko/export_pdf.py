@@ -278,7 +278,8 @@ def add_overview_page(c: canvas.Canvas, title, stats: list, fig, stats_panel_wid
     c.roundRect(panel_x, panel_y, panel_w, panel_h, 10, stroke=1, fill=1)
 
     # Small two-tone accent strip inset at the top of the panel, echoing the title bar
-    accent_reserve = 22  # vertical space reserved for the strip, rows fill the space below it
+    accent_reserve = 22  # top margin: accent strip + gap before content starts
+    bottom_margin = 22   # matching reserved margin below the last row, so content isn't top-heavy
     accent_y = panel_y + panel_h - 14
     accent_pad = 18
     c.setFillColor(RED_ACCENT)
@@ -286,10 +287,11 @@ def add_overview_page(c: canvas.Canvas, title, stats: list, fig, stats_panel_wid
     c.setFillColor(BLUE_ACCENT)
     c.rect(panel_x + accent_pad + 32, accent_y, panel_w - 2 * accent_pad - 32, 2.5, stroke=0, fill=1)
 
-    content_h = panel_h - accent_reserve
+    content_top = panel_y + panel_h - accent_reserve
+    content_h = panel_h - accent_reserve - bottom_margin
     row_h = content_h / len(stats)
     for i, (value, label, pct) in enumerate(stats):
-        row_top_y = panel_y + content_h - i * row_h
+        row_top_y = content_top - i * row_h
         row_center_y = row_top_y - row_h / 2
 
         c.setFont("Helvetica-Bold", 26)
