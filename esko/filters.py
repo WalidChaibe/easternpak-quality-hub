@@ -19,6 +19,26 @@ class ExclusionLog:
         )
 
 
+def filter_inactive_projects(df: pd.DataFrame, log: ExclusionLog) -> pd.DataFrame:
+    """
+    F0 - drop projects whose Project Status is 'On Hold' or 'Non-active' entirely,
+    before any other split/filter. Project Status is a per-project attribute (never
+    varies across a project's own rows), so this is a safe project-level exclusion.
+    Applied first since these projects shouldn't count as genuinely active work in
+    EITHER the completed or open populations - a paused/inactive project sitting
+    open would otherwise inflate the open-project backlog with work that isn't
+    actually being worked on.
+    """
+    inactive_statuses = {"On Hold", "Non-active"}
+    project_status = df.groupby("project_name")["project_status"].first()
+    inactive_projects = project_status[project_status.isin(inactive_statuses)].index
+
+    log.add("F0_inactive_or_on_hold_project", df[df["project_name"].isin(inactive_projects)]
+            [["project_name", "project_status"]].drop_duplicates().reset_index(drop=True))
+
+    return df[~df["project_name"].isin(inactive_projects)].copy()
+
+
 def split_completed_open(df: pd.DataFrame):
     """F1 - split (never drop) into completed vs open project populations."""
     project_completed = df.groupby("project_name")["project_completed_date"].max()

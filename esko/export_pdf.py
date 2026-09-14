@@ -236,15 +236,35 @@ def add_overview_page(c: canvas.Canvas, title, stats: list, fig, stats_panel_wid
     """Single stat panel on the left (one bordered rectangle, stats stacked
     inside it top to bottom, each with an optional percentage), a larger
     chart taking up the rest of the width on the right. No dividing line, no
-    sub-headings on either side - just one title bar and two zones."""
+    sub-headings on either side - just one title bar and two zones.
+
+    The panel's height is sized to match the chart's TRUE rendered height
+    (not the full allocated box) - since the chart image is fit into the box
+    with preserveAspectRatio, its actual rendered height is usually smaller
+    than the box, centered within it. Sizing the panel to the box instead of
+    the true image size leaves the panel visibly taller than the chart and
+    off-center relative to it."""
     c.setFillColor(WHITE)
     c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
     _title_bar(c, title)
 
+    chart_area_x = BOX_X + (PAGE_W - 2 * BOX_X) * stats_panel_width_frac + 30
+    chart_area_w = PAGE_W - BOX_X - chart_area_x
+    chart_area_y = _y_from_top(BOX_Y_FROM_TOP + BOX_H)
+    chart_area_h = BOX_H
+
+    png_buf = _save_fig_png_bytes(fig)
+    img_reader = ImageReader(png_buf)
+    img_w, img_h = img_reader.getSize()
+    scale = min(chart_area_w / img_w, chart_area_h / img_h)
+    rendered_w, rendered_h = img_w * scale, img_h * scale
+    chart_x = chart_area_x + (chart_area_w - rendered_w) / 2
+    chart_y = chart_area_y + (chart_area_h - rendered_h) / 2
+
     panel_w = (PAGE_W - 2 * BOX_X) * stats_panel_width_frac
     panel_x = BOX_X
-    panel_y = _y_from_top(BOX_Y_FROM_TOP + BOX_H)
-    panel_h = BOX_H
+    panel_h = rendered_h
+    panel_y = chart_area_y + (chart_area_h - panel_h) / 2  # same vertical center as the chart
 
     c.setFillColor(LIGHT_BLUE)
     c.setStrokeColor(NAPCO_BLUE)
@@ -266,11 +286,7 @@ def add_overview_page(c: canvas.Canvas, title, stats: list, fig, stats_panel_wid
             c.setLineWidth(0.75)
             c.line(panel_x + 16, row_top_y, panel_x + panel_w - 16, row_top_y)
 
-    chart_x = panel_x + panel_w + 30
-    chart_w = PAGE_W - BOX_X - chart_x
-    png_buf = _save_fig_png_bytes(fig)
-    c.drawImage(ImageReader(png_buf), chart_x, panel_y, width=chart_w, height=panel_h,
-                preserveAspectRatio=True, anchor="c", mask="auto")
+    c.drawImage(img_reader, chart_x, chart_y, width=rendered_w, height=rendered_h, mask="auto")
 
 
 def add_split_page(c: canvas.Canvas, title, left_title, left_stats: list, right_title, right_fig, right_subtitle: str = None):

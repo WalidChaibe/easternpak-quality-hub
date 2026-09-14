@@ -9,7 +9,7 @@ from esko.stages import (
     load_stage_map, apply_stage_taxonomy, drop_excluded, save_stage_map, existing_stages,
     add_step_to_stage, rename_stage, next_available_stage_no,
 )
-from esko.filters import split_completed_open, filter_truncated, apply_sidebar_filters, ExclusionLog
+from esko.filters import split_completed_open, filter_truncated, filter_inactive_projects, apply_sidebar_filters, ExclusionLog
 from esko.metrics import per_project_metrics, per_step_metrics, weighted_lead_time, sanity_check_weighting
 from esko.pending import find_pending_task, open_project_ages, count_by_pending_stage, count_by_pending_owner, ageing_buckets_by_stage, oldest_open_projects
 from esko import charts
@@ -44,8 +44,9 @@ def show():
     weight_basis = st.sidebar.radio("Weighting basis", ["global", "stage"], index=0,
                                      help="DECIDED default is 'global' (spec 4.3). 'stage' is old workbook behaviour, for reconciliation only.")
 
-    # ---- Pipeline: F1 -> F2 -> stage taxonomy -> F3 ----
+    # ---- Pipeline: F0 -> F1 -> F2 -> stage taxonomy -> F3 ----
     log = ExclusionLog()
+    raw_df = filter_inactive_projects(raw_df, log)
     completed_raw, open_raw = split_completed_open(raw_df)
     completed_raw = filter_truncated(completed_raw, log)
 
