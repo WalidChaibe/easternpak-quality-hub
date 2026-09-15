@@ -57,10 +57,15 @@ BOX_W = 880
 BOX_H = 408
 
 NAPCO_BLUE = colors.HexColor(theme.NAPCO_BLUE)
-TITLE_BLUE = colors.HexColor("#0E5E86")   # matches the reference PDF template's heading color exactly
+# One single Napco standard blue, used everywhere without exception. TITLE_BLUE and
+# BLUE_ACCENT used to be separate hex values (#0E5E86 and #0C5595 respectively) - a real,
+# visible inconsistency (title text, chart bars/numbers, and accent lines were each a
+# subtly different blue). Both are now plain aliases of NAPCO_BLUE, so every existing call
+# site that references them automatically gets the one standard color with no other changes.
+TITLE_BLUE = NAPCO_BLUE
+BLUE_ACCENT = NAPCO_BLUE
 LIGHT_BLUE = colors.HexColor(theme.LIGHT_BLUE)
 RED_ACCENT = colors.HexColor(theme.RED_ACCENT)
-BLUE_ACCENT = colors.HexColor(theme.BLUE_ACCENT)
 DARK_TEXT = colors.HexColor(theme.DARK_TEXT)
 GRAY_BG = colors.HexColor(theme.GRAY_BG)
 WHITE = colors.white
