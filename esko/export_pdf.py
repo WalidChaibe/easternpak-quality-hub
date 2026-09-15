@@ -290,26 +290,36 @@ def add_overview_page(c: canvas.Canvas, title, stats: list, fig, stats_panel_wid
     content_top = panel_y + panel_h - accent_reserve
     content_h = panel_h - accent_reserve - bottom_margin
     row_h = content_h / len(stats)
+
+    value_font_size = 26
+    label_font_size = 12
+    top_clearance = 8        # divider (or accent strip) down to the top of the number's glyph
+    value_cap_height = value_font_size * 0.72
+    gap_value_to_label = 8
+    label_line_height = label_font_size * 1.0
+
     for i, (value, label, pct) in enumerate(stats):
         row_top_y = content_top - i * row_h
-        row_center_y = row_top_y - row_h / 2
 
-        c.setFont("Helvetica-Bold", 26)
+        value_baseline = row_top_y - top_clearance - value_cap_height
+        label_baseline = value_baseline - gap_value_to_label - label_line_height
+
+        c.setFont("Helvetica-Bold", value_font_size)
         c.setFillColor(NAPCO_BLUE)
-        value_w = c.stringWidth(str(value), "Helvetica-Bold", 26)
+        value_w = c.stringWidth(str(value), "Helvetica-Bold", value_font_size)
         pct_text = f"  ({pct})" if pct else ""
         pct_w = c.stringWidth(pct_text, "Helvetica", 13) if pct else 0
         total_w = value_w + pct_w
         start_x = panel_x + panel_w / 2 - total_w / 2
-        c.drawString(start_x, row_center_y + 9, str(value))
+        c.drawString(start_x, value_baseline, str(value))
         if pct:
             c.setFont("Helvetica", 13)
             c.setFillColor(colors.HexColor("#6B7280"))
-            c.drawString(start_x + value_w, row_center_y + 9, pct_text)
+            c.drawString(start_x + value_w, value_baseline, pct_text)
 
-        c.setFont("Helvetica", 12)
+        c.setFont("Helvetica", label_font_size)
         c.setFillColor(DARK_TEXT)
-        c.drawCentredString(panel_x + panel_w / 2, row_center_y - 11, label)
+        c.drawCentredString(panel_x + panel_w / 2, label_baseline, label)
 
         if i > 0:
             c.setStrokeColor(colors.HexColor("#E5E7EB"))
