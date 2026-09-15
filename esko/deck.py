@@ -87,7 +87,8 @@ def build_deck(
 
 def build_pdf(
     *,
-    closed_project_count: int,
+    all_closed_project_count: int,   # ALL closed projects, including rework - for the front overview only
+    closed_project_count: int,       # non-rework closed only - used by Section 1
     closed_weighted_lead_time: float,
     open_project_count: int,
     open_age_bucket_labels: list,
@@ -109,24 +110,26 @@ def build_pdf(
 ) -> io.BytesIO:
     """Three clean, separate analyses - not one mixed report:
       1. Cover
+      2. Analysis Overview - Closed vs Open (front-page snapshot, all closed
+         projects incl. rework + open, before the detailed 3-way split below)
       -- Closed Project Lead Time Analysis --
       (non-rework closed projects only; weighted by basis='project_count', NOT
       'global' - see esko/metrics.py for why: 'global' caps every step's weight
       at <=1.0 by construction, which structurally under-credits steps that
       genuinely recur more than once per project. project_count removes that
       ceiling, so a step's weight is literally its average occurrences/project.)
-      2. Overview (count + weighted lead time + nothing else mixed in)
-      3-4. Flow Overview (process order, then sorted)
-      5-11. Stage deep-dives (top 7 non-zero steps per stage)
-      12. Average task duration by assignee (min. 10 tasks)
-      13. Rejection-cycle recurrence histogram (internal revision loops - NOT
+      3. Overview (count + weighted lead time + nothing else mixed in)
+      4-5. Flow Overview (process order, then sorted)
+      6-12. Stage deep-dives (top 7 non-zero steps per stage)
+      13. Average task duration by assignee (min. 10 tasks)
+      14. Rejection-cycle recurrence histogram (internal revision loops - NOT
           the same thing as the named '_RE-WORK' projects in section 3 below;
           verified zero overlap between the two populations)
       -- Open Project Analysis --
       (unchanged from before)
-      14. Age distribution overview
-      15. Status of open projects (customer- vs internally-pending split)
-      16. Internally-pending projects, named
+      15. Age distribution overview
+      16. Status of open projects (customer- vs internally-pending split)
+      17. Internally-pending projects, named
       -- Rework Project Analysis --
       (projects literally named '_RE-WORK' - verified these are a structurally
       different kind of project: 100% of them touch ONLY the Cliché Ordering
@@ -141,6 +144,25 @@ def build_pdf(
     pdf.add_cover_page(
         c, "Esko Lead-Time Analytics", subtitle,
         date_str=date.today().strftime("%d %b %Y"), logo_path=logo_path,
+    )
+    c.showPage()
+
+    # ---- Front-page overview: all closed (incl. rework) vs open, before the detailed split ----
+    total_projects = all_closed_project_count + open_project_count
+    closed_pct = f"{all_closed_project_count / total_projects:.0%}" if total_projects else None
+    open_pct = f"{open_project_count / total_projects:.0%}" if total_projects else None
+
+    fig = nc.ranked_bar(open_age_bucket_labels, open_age_bucket_counts,
+                        title="", ylabel="Open project count", color=px.theme.NAPCO_BLUE, rotation=0)
+    pdf.add_overview_page(
+        c, "Analysis Overview - Closed vs Open",
+        stats=[
+            (total_projects, "Total Projects", None),
+            (all_closed_project_count, "Projects Closed", closed_pct),
+            (open_project_count, "Projects Open", open_pct),
+            (f"{closed_weighted_lead_time:.1f} d", "Weighted Lead Time (excl. rework)", None),
+        ],
+        fig=fig,
     )
     c.showPage()
 

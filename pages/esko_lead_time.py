@@ -302,6 +302,7 @@ def show():
         with col_pdf:
             if st.button("📥 Generate PDF report"):
                 buf = build_pdf(
+                    all_closed_project_count=completed_mapped["project_name"].nunique(),
                     closed_project_count=n_clean,
                     closed_weighted_lead_time=total_system_lead_time_clean,
                     open_project_count=open_mapped["project_name"].nunique(),
