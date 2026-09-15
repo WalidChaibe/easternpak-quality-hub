@@ -19,6 +19,24 @@ class ExclusionLog:
         )
 
 
+def split_rework_projects(completed: pd.DataFrame):
+    """
+    Splits the completed population into (clean, rework) by project name -
+    any project literally named with a '_RE-WORK' (or 're-work', case/hyphen-
+    insensitive) suffix. These are a genuinely different KIND of project, not
+    a variant of a normal pipeline project that happened to need revision:
+    verified against real data that every one of them contains ONLY Cliché
+    Ordering Process tasks (Cliche Re Order Request / Re Order Cliche
+    Production / Cliché Quality Checking) - they never touch Artwork
+    Development, Customer Approval, PDN, or any other stage, since they're
+    reprint-only requests for an already-approved job. Mixing them into the
+    main 7-stage weighted analysis would be comparing two different things -
+    hence a fully separate rework-project analysis instead.
+    """
+    is_rework = completed["project_name"].str.contains("re-work", case=False, na=False, regex=False)
+    return completed.loc[~is_rework].copy(), completed.loc[is_rework].copy()
+
+
 def filter_inactive_projects(df: pd.DataFrame, log: ExclusionLog) -> pd.DataFrame:
     """
     F0 - drop projects whose Project Status is 'On Hold' or 'Non-active' entirely,

@@ -76,14 +76,25 @@ def weighted_lead_time(
     step_metrics: pd.DataFrame,
     stage_map_applied: pd.DataFrame,
     basis: str = WEIGHT_BASIS_DEFAULT,
+    n_projects: int = None,
 ) -> pd.DataFrame:
     """
     Spec 4.3. Weight each step by how often it occurs, so rare steps don't overstate.
 
     basis='global' (default, DECIDED): denominator = max(count) across ALL steps.
+                   Every weight is capped at <=1.0 by construction, since no step's
+                   count can exceed the max - this means a step that genuinely
+                   recurs more than once per project on average (rework) can never
+                   be credited with more than "one occurrence" worth of weight.
     basis='stage': denominator = max(count) within the step's own stage
                    (old workbook behaviour, kept only for reconciliation - do NOT
                    apply a second stage-level re-weighting on top of this, spec 4.3).
+    basis='project_count': denominator = n_projects (required). weight_step then
+                   means "average occurrences of this step per project" literally,
+                   and CAN exceed 1.0 for steps that genuinely recur - removing the
+                   artificial ceiling 'global' imposes. Decided as the standard for
+                   the closed-project (non-rework) analysis after finding 'global'
+                   structurally under-credits recurring steps.
 
     Returns step-level weighted_lead_time, plus stage_lead_time and
     total_system_lead_time attached as columns for convenience.
@@ -108,8 +119,12 @@ def weighted_lead_time(
     elif basis == "stage":
         max_by_stage = steps.groupby("stage_no")["count"].transform("max")
         steps["weight_step"] = steps["count"] / max_by_stage
+    elif basis == "project_count":
+        if not n_projects:
+            raise ValueError("basis='project_count' requires n_projects to be passed explicitly")
+        steps["weight_step"] = steps["count"] / n_projects
     else:
-        raise ValueError("basis must be 'global' or 'stage'")
+        raise ValueError("basis must be 'global', 'stage', or 'project_count'")
 
     steps["weighted_lead_time"] = steps["weight_step"] * steps["avg_days"]
 

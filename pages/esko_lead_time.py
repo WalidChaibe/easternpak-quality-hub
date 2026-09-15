@@ -9,7 +9,7 @@ from esko.stages import (
     load_stage_map, apply_stage_taxonomy, drop_excluded, save_stage_map, existing_stages,
     add_step_to_stage, rename_stage, next_available_stage_no,
 )
-from esko.filters import split_completed_open, filter_truncated, filter_inactive_projects, apply_sidebar_filters, ExclusionLog
+from esko.filters import split_completed_open, filter_truncated, filter_inactive_projects, split_rework_projects, apply_sidebar_filters, ExclusionLog
 from esko.metrics import per_project_metrics, per_step_metrics, weighted_lead_time, sanity_check_weighting
 from esko.pending import find_pending_task, open_project_ages, count_by_pending_stage, count_by_pending_owner, ageing_buckets_by_stage, oldest_open_projects
 from esko import charts
@@ -213,21 +213,45 @@ def show():
 
         st.divider()
 
+        # ---- Split closed projects: clean pipeline projects vs. named '_RE-WORK' cliché
+        # reorders - verified these are a structurally different kind of project (100% of
+        # them touch only Cliche Ordering Process, never the rest of the pipeline), so they
+        # get their own separate analysis instead of distorting the main weighted numbers.
+        completed_clean, completed_rework = split_rework_projects(completed_mapped)
+        n_clean = completed_clean["project_name"].nunique()
+
+        # ---- Section 1 metrics, recomputed on the CLEAN (non-rework) population, with
+        # basis='project_count' instead of 'global' - see esko/metrics.py docstring: 'global'
+        # caps every step's weight at <=1.0 by construction (denominator = the busiest step's
+        # own count), which structurally under-credits any step that genuinely recurs more than
+        # once per project on average. 'project_count' removes that ceiling.
+        per_project_clean = per_project_metrics(completed_clean)
+        step_metrics_clean = per_step_metrics(completed_clean)
+        weighted_clean = weighted_lead_time(step_metrics_clean, completed_clean,
+                                             basis="project_count", n_projects=n_clean)
+        stage_lead_time_clean = weighted_clean.attrs["stage_lead_time"]
+        total_system_lead_time_clean = weighted_clean.attrs["total_system_lead_time"]
+
         # ---- Slowest average task duration by assignee (min. 10 tasks, NOT total volume) ----
         # Ranking by total days summed would credit high-volume-but-fast people (e.g. someone who
         # touches nearly every project but is quick per task) as if they were the biggest problem,
         # purely because of activity volume - the same frequency-vs-duration conflation already
         # fixed for steps. avg_days per task is the genuine per-person speed signal; a minimum task
         # count avoids one or two atypical tasks making someone look artificially slow or fast.
-        internal_assignments = completed_mapped[
-            ~completed_mapped["assigned_to"].str.contains("REQUESTOR", case=False, na=False)
+        internal_assignments = completed_clean[
+            ~completed_clean["assigned_to"].str.contains("REQUESTOR", case=False, na=False)
         ]
         owner_stats = internal_assignments.groupby("assigned_to")["task_duration_days"].agg(
             count="count", avg_days="mean"
         ).reset_index()
         owner_stats_filtered = owner_stats[owner_stats["count"] >= 10]
         top_owners = owner_stats_filtered.sort_values("avg_days", ascending=False).head(7)
-        top_owners_median_avg_days = float(owner_stats_filtered["avg_days"].median()) if len(owner_stats_filtered) else 0.0
+
+        # ---- Internal revision-cycle recurrence (NOT the same as named rework projects -
+        # verified zero overlap between this population and the '_RE-WORK'-named ones) ----
+        busiest_step_name = step_metrics_clean.sort_values("count", ascending=False).iloc[0]["stage_name"]
+        rework_cycle_by_project = completed_clean[completed_clean["stage_name"] == busiest_step_name].groupby("project_name").size()
+        rework_cycle_occurrences = rework_cycle_by_project.values
 
         # ---- Open projects over 15 days: internal vs customer-side hold ----
         # "Pending on customer" is TWO signals, combined with OR:
@@ -257,53 +281,44 @@ def show():
         )
         age_dist = aged_bucketed["proj_age_bucket"].value_counts().reindex(age_bucket_labels).fillna(0)
 
-        # ---- Slide 3: true system lead time, two lenses (closed-only vs. blended) ----
-        # Blended = every individually-completed task (task_completed populated), whether its
-        # parent project is closed or still open - averaged per step, then weighted by relative
-        # frequency exactly like the closed-only view, just on a larger, blended pool of rows.
-        blended_tasks = pd.concat([
-            completed_mapped[completed_mapped["task_completed"].notna()],
-            open_mapped[open_mapped["task_completed"].notna()],
-        ], ignore_index=True)
-        blended_step_metrics = per_step_metrics(blended_tasks)
-        blended_weighted = weighted_lead_time(blended_step_metrics, blended_tasks, basis="global")
-        blended_total = blended_weighted.attrs["total_system_lead_time"]
-
-        # ---- Rework signal: how often the single busiest step recurs per project ----
-        busiest_step_name = step_metrics.sort_values("count", ascending=False).iloc[0]["stage_name"]
-        rework_by_project = completed_mapped[completed_mapped["stage_name"] == busiest_step_name].groupby("project_name").size()
-        rework_occurrences = rework_by_project.values
-        rework_recurrence_pct = 100.0 * (rework_by_project > 1).sum() / len(rework_by_project) if len(rework_by_project) else 0.0
-
-        # ---- Slide 4: median project lead time, two lenses (project-level, not stage-weighted) ----
-        # Closed-only = median calc_lead_time (actual start-to-finish) across the 386 closed projects.
-        # Blended = those same finish times pooled together with every open project's CURRENT age
-        # (days since creation, since it hasn't finished yet) into one combined median.
-        closed_only_median_project_days = float(per_project["calc_lead_time"].median())
-        blended_project_pool = pd.concat([per_project["calc_lead_time"], aged["project_age"]], ignore_index=True)
-        blended_median_project_days = float(blended_project_pool.median())
+        # ---- Section 3: rework (named '_RE-WORK') project stats ----
+        rework_project_count = completed_rework["project_name"].nunique()
+        rw_dates = completed_rework.groupby("project_name").agg(
+            created=("project_created_date", "min"), completed=("project_completed_date", "max")
+        )
+        import numpy as _np
+        rw_dates["lead_time"] = rw_dates.apply(
+            lambda r: _np.busday_count(r["created"].date(), r["completed"].date()), axis=1
+        ) if len(rw_dates) else pd.Series(dtype=float)
+        rework_median_lead_time = float(rw_dates["lead_time"].median()) if len(rw_dates) else 0.0
+        rework_mean_lead_time = float(rw_dates["lead_time"].mean()) if len(rw_dates) else 0.0
+        rework_step_breakdown = (
+            completed_rework.groupby("stage_name")["task_duration_days"].mean()
+            .reset_index().rename(columns={"task_duration_days": "avg_days"})
+            .sort_values("avg_days", ascending=False)
+        )
 
         col_pdf, col_xl1, col_xl2, col_xl3 = st.columns(4)
         with col_pdf:
             if st.button("📥 Generate PDF report"):
                 buf = build_pdf(
-                    closed_project_count=completed_mapped["project_name"].nunique(),
-                    closed_weighted_lead_time=total_system_lead_time,
+                    closed_project_count=n_clean,
+                    closed_weighted_lead_time=total_system_lead_time_clean,
                     open_project_count=open_mapped["project_name"].nunique(),
                     open_age_bucket_labels=age_bucket_labels,
                     open_age_bucket_counts=age_dist.values.tolist(),
-                    closed_only_total=total_system_lead_time,
-                    blended_total=blended_total,
-                    closed_only_median_project_days=closed_only_median_project_days,
-                    blended_median_project_days=blended_median_project_days,
-                    stage_lead_time_df=stage_lead_time,
-                    weighted_full_df=weighted,
+                    stage_lead_time_df=stage_lead_time_clean,
+                    weighted_full_df=weighted_clean,
                     top_owners_df=top_owners,
                     over15_internal_df=over15_internal,
                     over15_internal_count=over15_internal_count,
                     over15_external_count=over15_external_count,
-                    rework_step_name=busiest_step_name,
-                    rework_occurrence_counts=rework_occurrences,
+                    rework_cycle_step_name=busiest_step_name,
+                    rework_cycle_occurrence_counts=rework_cycle_occurrences,
+                    rework_project_count=rework_project_count,
+                    rework_median_lead_time=rework_median_lead_time,
+                    rework_mean_lead_time=rework_mean_lead_time,
+                    rework_step_breakdown_df=rework_step_breakdown,
                     logo_path="static/napco_logo.png",
                 )
                 st.download_button("Download esko_lead_time_report.pdf", buf,

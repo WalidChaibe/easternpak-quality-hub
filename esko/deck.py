@@ -92,39 +92,49 @@ def build_pdf(
     open_project_count: int,
     open_age_bucket_labels: list,
     open_age_bucket_counts: list,
-    closed_only_total: float,
-    blended_total: float,
-    closed_only_median_project_days: float,
-    blended_median_project_days: float,
     stage_lead_time_df,
     weighted_full_df,
     top_owners_df,
     over15_internal_df,
     over15_internal_count: int,
     over15_external_count: int,
-    rework_step_name: str,
-    rework_occurrence_counts,
+    rework_cycle_step_name: str,
+    rework_cycle_occurrence_counts,
+    rework_project_count: int,
+    rework_median_lead_time: float,
+    rework_mean_lead_time: float,
+    rework_step_breakdown_df,     # columns: stage_name, avg_days (the 3 Cliché-reorder steps)
     logo_path=None,
     subtitle="Lead-Time Analytics",
 ) -> io.BytesIO:
-    """Structure:
+    """Three clean, separate analyses - not one mixed report:
       1. Cover
-      2. Analysis Overview - Closed vs Open (single stat panel + chart)
-      3. Weighted Lead Time - Closed vs Blended View (stage-weighted lens)
-      4. Median Project Lead Time - Closed vs Blended View (project-level lens,
-         blended = closed projects' actual lead time + open projects' current age)
-      -- Where is the time going --
-      5. Flow Overview - Weighted Lead Time by Stage (process order)
-      6. Flow Overview - Weighted Lead Time by Stage (sorted)
-      7-13. Stage N - <label> - Deep Dive (top 7, non-zero only)
-      -- The Open Backlog --
-      14. Status of Open Projects (single stacked bar, every segment labeled)
-      15. Internally Pending Open Projects (sorted oldest first)
-      -- People & Process Signals --
-      16. Average Task Duration by Assignee (min. 10 tasks)
-      17. Occurrences of '<step>' per Project
-    Titles are deliberately plain/descriptive, not conclusions - the numbers
-    and charts make the case, the title just says what's on the page."""
+      -- Closed Project Lead Time Analysis --
+      (non-rework closed projects only; weighted by basis='project_count', NOT
+      'global' - see esko/metrics.py for why: 'global' caps every step's weight
+      at <=1.0 by construction, which structurally under-credits steps that
+      genuinely recur more than once per project. project_count removes that
+      ceiling, so a step's weight is literally its average occurrences/project.)
+      2. Overview (count + weighted lead time + nothing else mixed in)
+      3-4. Flow Overview (process order, then sorted)
+      5-11. Stage deep-dives (top 7 non-zero steps per stage)
+      12. Average task duration by assignee (min. 10 tasks)
+      13. Rejection-cycle recurrence histogram (internal revision loops - NOT
+          the same thing as the named '_RE-WORK' projects in section 3 below;
+          verified zero overlap between the two populations)
+      -- Open Project Analysis --
+      (unchanged from before)
+      14. Age distribution overview
+      15. Status of open projects (customer- vs internally-pending split)
+      16. Internally-pending projects, named
+      -- Rework Project Analysis --
+      (projects literally named '_RE-WORK' - verified these are a structurally
+      different kind of project: 100% of them touch ONLY the Cliché Ordering
+      Process stage, never Artwork Development/Approval/PDN, since they're
+      reprint-only requests for already-approved jobs. Not mixed into section 1.)
+      17. Rework project stats (count, median/mean lead time)
+      18. Which of their 3 steps takes the longest
+    """
     buf = io.BytesIO()
     c = pdf.new_canvas(buf)
 
@@ -134,58 +144,17 @@ def build_pdf(
     )
     c.showPage()
 
-    # ---- Slide 2: Analysis Overview ----
-    total_projects = closed_project_count + open_project_count
-    closed_pct = f"{closed_project_count / total_projects:.0%}" if total_projects else None
-    open_pct = f"{open_project_count / total_projects:.0%}" if total_projects else None
-
-    fig = nc.ranked_bar(open_age_bucket_labels, open_age_bucket_counts,
-                        title="", ylabel="Open project count", color=px.theme.NAPCO_BLUE, rotation=0)
-    pdf.add_overview_page(
-        c, "Analysis Overview - Closed vs Open",
-        stats=[
-            (total_projects, "Total Projects", None),
-            (closed_project_count, "Projects Closed", closed_pct),
-            (open_project_count, "Projects Open", open_pct),
-            (f"{closed_weighted_lead_time:.1f} d", "Weighted Lead Time", None),
-        ],
-        fig=fig,
-    )
+    # ==================== SECTION 1: CLOSED PROJECT LEAD TIME ====================
+    pdf.add_section_page(c, "Closed Project Lead Time Analysis")
     c.showPage()
 
-    # ---- Slide 3: stage-weighted lens ----
-    pdf.add_headline_comparison_page(
-        c, "Weighted Lead Time - Closed vs Blended View",
-        cards=[
-            (f"{closed_only_total:.1f} d", "Closed-only view", "Projects that finished the full journey"),
-            (f"{blended_total:.1f} d", "Blended view", "Every completed task, incl. work inside open projects"),
-        ],
-        note=(
-            "Weighted view: each process stage's time is the average duration of its tasks, scaled "
-            "by how often that task actually occurs. Closed-only uses only finished projects; "
-            "blended also counts individually-completed tasks from projects that are still open."
-        ),
+    pdf.add_kpi_page(
+        c, "Overview",
+        {
+            "Projects analysed": (closed_project_count, "Closed, excluding named rework projects"),
+            "Weighted lead time": (f"{closed_weighted_lead_time:.1f} d", "Weight = avg. occurrences per project"),
+        },
     )
-    c.showPage()
-
-    # ---- Slide 4: project-level lens ----
-    pdf.add_headline_comparison_page(
-        c, "Median Project Lead Time - Closed vs Blended View",
-        cards=[
-            (f"{closed_only_median_project_days:.1f} d", "Closed-only view", "Median actual lead time, finished projects only"),
-            (f"{blended_median_project_days:.1f} d", "Blended view", "Also includes open projects' current age"),
-        ],
-        note=(
-            "Project-level view (different from the weighted view above): closed-only is the "
-            "median actual start-to-finish time for the 386 finished projects. Blended pools those "
-            "same finish times together with every open project's current age (days since creation, "
-            "since it hasn't finished yet) into one combined median."
-        ),
-    )
-    c.showPage()
-
-    # ---- Where is the time going ----
-    pdf.add_section_page(c, "Where Is the Time Going?")
     c.showPage()
 
     flow_sorted = stage_lead_time_df.sort_values("stage_no")
@@ -199,25 +168,42 @@ def build_pdf(
     pdf.add_chart_page(c, "Flow Overview - Weighted Lead Time by Stage (sorted)", fig)
     c.showPage()
 
-    # ---- Stage deep-dives: which specific steps drive each stage's total (top 7, non-zero only) ----
     for _, stage_row in stage_lead_time_df.sort_values("stage_lead_time", ascending=False).iterrows():
         stage_no, stage_label = stage_row["stage_no"], stage_row["stage_label"]
         stage_steps = (
             weighted_full_df[weighted_full_df["stage_no"] == stage_no]
             .sort_values("weighted_lead_time", ascending=False)
         )
-        # Drop anything that rounds to 0.0 at the chart's own 1-decimal display -
-        # a bar and a crowded x-axis label for a value too small to read isn't useful.
         stage_steps = stage_steps[stage_steps["weighted_lead_time"].round(1) > 0].head(7)
         if len(stage_steps) < 2:
-            continue  # a single-step stage has nothing to "deep dive" into
+            continue
         fig = nc.ranked_bar(stage_steps["stage_name"], stage_steps["weighted_lead_time"],
                             title="", ylabel="Weighted lead time (days)", color=px.theme.NAPCO_BLUE)
         pdf.add_chart_page(c, f"Stage {int(stage_no)} - {stage_label} - Deep Dive", fig)
         c.showPage()
 
-    # ---- The Open Backlog ----
-    pdf.add_section_page(c, "The Open Backlog")
+    fig = nc.ranked_bar(top_owners_df["assigned_to"], top_owners_df["avg_days"],
+                        title="", ylabel="Average days per task", color=px.theme.GOLD)
+    pdf.add_chart_page(c, "Average Task Duration by Assignee (min. 10 tasks)", fig)
+    c.showPage()
+
+    fig = nc.occurrence_histogram(rework_cycle_occurrence_counts, title="")
+    pdf.add_chart_page(c, f"Occurrences of '{rework_cycle_step_name}' per Project (Internal Revision Cycles)", fig)
+    c.showPage()
+
+    # ==================== SECTION 2: OPEN PROJECT ANALYSIS ====================
+    pdf.add_section_page(c, "Open Project Analysis")
+    c.showPage()
+
+    fig = nc.ranked_bar(open_age_bucket_labels, open_age_bucket_counts,
+                        title="", ylabel="Open project count", color=px.theme.NAPCO_BLUE, rotation=0)
+    pdf.add_overview_page(
+        c, "Overview",
+        stats=[
+            (open_project_count, "Total Open Projects", None),
+        ],
+        fig=fig,
+    )
     c.showPage()
 
     fig = nc.single_stacked_bar(
@@ -237,17 +223,28 @@ def build_pdf(
     )
     c.showPage()
 
-    # ---- People and process signals ----
-    pdf.add_section_page(c, "People & Process Signals")
+    # ==================== SECTION 3: REWORK PROJECT ANALYSIS ====================
+    pdf.add_section_page(c, "Rework Project Analysis")
     c.showPage()
 
-    fig = nc.ranked_bar(top_owners_df["assigned_to"], top_owners_df["avg_days"],
-                        title="", ylabel="Average days per task", color=px.theme.GOLD)
-    pdf.add_chart_page(c, "Average Task Duration by Assignee (min. 10 tasks)", fig)
+    pdf.add_kpi_page(
+        c, "Overview",
+        {
+            "Rework projects": (rework_project_count, "Named '_RE-WORK' - cliché reprint requests only"),
+            "Median lead time": (f"{rework_median_lead_time:.1f} d", "Creation to completion"),
+            "Mean lead time": (f"{rework_mean_lead_time:.1f} d", "Pulled up by a small number of outliers"),
+        },
+        footnote=(
+            "Every rework project touches only the Cliche Ordering Process stage - never Artwork "
+            "Development, Customer Approval, or PDN - since these are reprint requests for artwork "
+            "that was already approved previously, not a variant of a normal full-pipeline project."
+        ),
+    )
     c.showPage()
 
-    fig = nc.occurrence_histogram(rework_occurrence_counts, title="")
-    pdf.add_chart_page(c, f"Occurrences of '{rework_step_name}' per Project", fig)
+    fig = nc.ranked_bar(rework_step_breakdown_df["stage_name"], rework_step_breakdown_df["avg_days"],
+                        title="", ylabel="Average days per task", color=px.theme.GOLD, rotation=0)
+    pdf.add_chart_page(c, "Rework Projects - Average Duration by Step", fig)
     # no trailing showPage() - this is the last page
 
     return pdf.finish(c, buf)
