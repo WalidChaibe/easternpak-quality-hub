@@ -7,13 +7,15 @@ ROLE_LABELS = {
     "quality_manager": "Quality Manager",
     "quality_engineer":"Quality Engineer",
     "viewer":          "Viewer",
+    "pm":              "PM (Demand Forecast only)",
 }
 
 ROLE_PERMISSIONS = {
-    "admin":           ["dashboard","nc","kpi","requirements","documents","audits","proc_builder","admin","esko"],
+    "admin":           ["dashboard","nc","kpi","requirements","documents","audits","proc_builder","admin","esko","forecast"],
     "quality_manager": ["dashboard","nc","kpi","requirements","documents","audits","proc_builder","esko"],
     "quality_engineer":["dashboard","nc","kpi","requirements","documents","audits","proc_builder","esko"],
     "viewer":          ["dashboard","nc","kpi","requirements","documents","audits","proc_builder","esko"],
+    "pm":              ["forecast"],
 }
 
 WRITE_ROLES = {"admin","quality_manager","quality_engineer"}

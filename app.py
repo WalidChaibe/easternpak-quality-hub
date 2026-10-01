@@ -50,6 +50,26 @@ def show_login():
                     st.error("Invalid email or password.")
 
 
+# ── Navigation items: (page key, label, permission key) ───────
+NAV_ITEMS = [
+    ("dashboard",    "🏠  Dashboard",               "dashboard"),
+    ("nc",           "📋  NC / CAPA",               "nc"),
+    ("kpi",          "📊  KPI Tracking",             "kpi"),
+    ("requirements", "📘  Requirements Register",    "requirements"),
+    ("documents",    "📁  Document Register",        "documents"),
+    ("audits",       "🔍  Internal Audits",          "audits"),
+    ("proc_builder", "📄  Procedures & Processes",   "proc_builder"),
+    ("esko",         "⏱️  Esko Lead Time",           "esko"),
+    ("forecast",     "📈  Demand Forecast",          "forecast"),
+    ("admin",        "⚙️  User Management",          "admin"),
+]
+
+
+def _perm_for(page: str) -> str:
+    """Permission key for a page key (the NC sub-pages share the 'nc' permission)."""
+    return "nc" if page in ("nc", "nc_iso", "nc_brcgs") else page
+
+
 # ── Sidebar navigation ────────────────────────────────────────
 def show_sidebar():
     profile = get_profile()
@@ -61,24 +81,14 @@ def show_sidebar():
         st.caption(ROLE_LABELS.get(role, role))
         st.markdown("---")
 
-        nav_items = [
-            ("dashboard",    "🏠  Dashboard",               "dashboard"),
-            ("nc",           "📋  NC / CAPA",               "nc"),
-            ("kpi",          "📊  KPI Tracking",             "kpi"),
-            ("requirements", "📘  Requirements Register",    "requirements"),
-            ("documents",    "📁  Document Register",        "documents"),
-            ("audits",       "🔍  Internal Audits",          "audits"),
-            ("proc_builder", "📄  Procedures & Processes",   "proc_builder"),
-            ("esko",         "⏱️  Esko Lead Time",           "esko"),
-            ("admin",        "⚙️  User Management",          "admin"),
-        ]
+        # Land on the first page this role may open (a forecast-only user never sees the dashboard)
+        allowed = [key for key, _, perm in NAV_ITEMS if has_permission(perm)]
+        if allowed and _perm_for(st.session_state.get("page", "")) not in allowed:
+            st.session_state["page"] = allowed[0]
 
-        if "page" not in st.session_state:
-            st.session_state["page"] = "dashboard"
-
-        for key, label, perm in nav_items:
+        for key, label, perm in NAV_ITEMS:
             if has_permission(perm):
-                active = "▶ " if st.session_state["page"] == key else "   "
+                active = "▶ " if st.session_state.get("page") == key else "   "
                 if st.button(f"{active}{label}", key=f"nav_{key}"):
                     st.session_state["page"] = key
                     st.rerun()
@@ -91,6 +101,11 @@ def show_sidebar():
 # ── Page router ───────────────────────────────────────────────
 def route():
     page = st.session_state.get("page", "dashboard")
+
+    # Server-side guard: never render a page the role isn't allowed to open
+    if not has_permission(_perm_for(page)):
+        st.error("You don't have access to this page.")
+        st.stop()
 
     if page == "dashboard":
         from pages.dashboard    import show; show()
@@ -109,6 +124,8 @@ def route():
         from pages.proc_builder import show; show()
     elif page == "esko":
         from pages.esko_lead_time import show; show()
+    elif page == "forecast":
+        from pages.demand_forecast import show; show()
     elif page == "admin":
         from pages.admin        import show; show()
 
@@ -118,5 +135,6 @@ if "profile" not in st.session_state:
     show_login()
 else:
     show_sidebar()
-    overdue_banner()
+    if has_permission("dashboard"):   # NC / document alerts only for quality roles
+        overdue_banner()
     route()
