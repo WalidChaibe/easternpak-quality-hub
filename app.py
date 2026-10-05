@@ -61,6 +61,7 @@ NAV_ITEMS = [
     ("proc_builder", "📄  Procedures & Processes",   "proc_builder"),
     ("esko",         "⏱️  Esko Lead Time",           "esko"),
     ("forecast",     "📈  Demand Forecast",          "forecast"),
+    ("quote2close",  "🎯  Quote to Close",           "quote2close"),
     ("admin",        "⚙️  User Management",          "admin"),
 ]
 
@@ -126,6 +127,8 @@ def route():
         from pages.esko_lead_time import show; show()
     elif page == "forecast":
         from pages.demand_forecast import show; show()
+    elif page == "quote2close":
+        from pages.quote_to_close import show; show()
     elif page == "admin":
         from pages.admin        import show; show()
 
