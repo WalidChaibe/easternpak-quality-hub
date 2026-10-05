@@ -8,6 +8,21 @@ import pandas as pd
 
 _NON_WORD = re.compile(r"[\W_]+", re.UNICODE)
 
+# Salespeople whose invoice lines are excluded BEFORE any analysis, with the reason.
+# Matched case-insensitively on the 'Salesman Name' column. Edit here if this changes.
+EXCLUDED_SALESMEN = {
+    "ZAINAB ALKHUNAIZI": "Runs the e-shop (not B2B demand)",
+}
+
+
+def exclude_salesmen(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split into (kept, excluded). Excluded lines are returned so the page can show them."""
+    names = df["salesman"].str.upper().str.strip()
+    mask = names.isin(EXCLUDED_SALESMEN.keys())
+    excluded = df.loc[mask].copy()
+    excluded["reason"] = names[mask].map(EXCLUDED_SALESMEN)
+    return df.loc[~mask].copy(), excluded
+
 
 def customer_key(name: str) -> str:
     """Uppercase, drop spaces and punctuation. Unicode-aware so Arabic names keep their letters."""

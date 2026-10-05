@@ -11,6 +11,7 @@ COLUMN_MAP = {
     "Inv Date": "inv_date",
     "Customer Name": "customer_raw",
     "Product Name": "item",
+    "Product Item MFG Code": "ft",
     "Shipped Tons": "tons",
     "Invoice Amount": "amount",
     "Contribution Amount": "contribution",
@@ -62,7 +63,7 @@ def read_invoice_file(content: bytes, name: str) -> tuple[pd.DataFrame, FileInfo
     df["inv_date"] = df["inv_date"].dt.normalize()
     for col in ["tons", "amount", "contribution"]:
         df[col] = _to_number(df[col]).fillna(0.0)
-    for col in ["customer_raw", "item", "salesman", "industry", "area"]:
+    for col in ["customer_raw", "item", "ft", "salesman", "industry", "area"]:
         df[col] = df[col].astype("string").str.strip().fillna("")
     df = df[df["customer_raw"] != ""]
 

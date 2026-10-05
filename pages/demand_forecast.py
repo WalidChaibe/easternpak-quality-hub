@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from utils.auth import require_auth, has_permission
-from forecast import load, clean, calendar as cal, classify as cl, models as md, charts
+from forecast import load, clean, calendar as cal, classify as cl, models as md, charts, export
 
 WINDOWS = {"12 months": 12, "6 months": 6, "3 months": 3}
 MAX_HORIZON = 24
@@ -19,9 +19,16 @@ def _read(content: bytes, name: str):
 
 @st.cache_data(show_spinner=False, max_entries=3)
 def _prepare(frames: list[pd.DataFrame]):
-    df = load.combine(frames)
-    df, merged = clean.standardize_customers(df)
-    return df, merged
+    full = load.combine(frames)
+    pi = clean.period_info(full)                      # analysis dates from ALL lines in the files
+    kept, excluded = clean.exclude_salesmen(full)     # e-shop lines out BEFORE any analysis
+    kept, merged = clean.standardize_customers(kept)
+    return kept, excluded, merged, pi
+
+
+@st.cache_data(show_spinner=False, max_entries=3)
+def _ft_mix(df: pd.DataFrame, cutoff: pd.Timestamp):
+    return md.ft_mix(df, cutoff, 12)
 
 
 @st.cache_data(show_spinner=False, max_entries=3)
@@ -79,8 +86,7 @@ def show():
                  "Remove one of each pair and upload again.")
         st.stop()
 
-    df, merged_names = _prepare(frames)
-    pi = clean.period_info(df)
+    df, excluded, merged_names, pi = _prepare(frames)
     attrs = clean.customer_attributes(df)
 
     daily = df.groupby("inv_date")["tons"].sum().reindex(pd.date_range(pi.data_start, pi.cutoff), fill_value=0.0)
@@ -89,8 +95,13 @@ def show():
     # ── Sidebar filters ──
     st.sidebar.header("Filters")
     window_label = st.sidebar.radio("Compare window", list(WINDOWS.keys()), index=0,
-                                    help="Window ending on the last invoice date, vs the same dates one year earlier.")
+                                    help="Window ending on the last invoice date.")
     months_w = WINDOWS[window_label]
+    comp_label = st.sidebar.radio(
+        "Compare with", list(cl.COMPARISONS.values()), index=0,
+        help="Same period last year removes seasonality. Previous period shows recent momentum, "
+             "but includes seasonal swings. For 12 months both are the same period.")
+    comparison = {v: k for k, v in cl.COMPARISONS.items()}[comp_label]
     with st.sidebar.expander("Status thresholds"):
         stable = st.slider("Stable band (±%)", 0, 30, 10, 1)
         strong = st.slider("Strong growth above (%)", stable + 1, 100, max(25, stable + 1), 1)
@@ -112,7 +123,7 @@ def show():
     # ════════════════════ Customer trends ════════════════════
     with tab_trend:
         th = cl.Thresholds(stable_band=stable / 100, strong_growth=strong / 100, min_mt=min_mt)
-        cls_all = cl.classify(df, attrs, pi.cutoff, months_w, th)
+        cls_all = cl.classify(df, attrs, pi.cutoff, months_w, th, comparison)
         a = dict(cls_all.attrs)
         cls_df = cls_all[cls_all["customer"].isin(selected)].copy()
         cls_df.attrs = {}
@@ -122,15 +133,27 @@ def show():
                        f"uploaded ({pi.data_start:%d %b %Y}). Upload the earlier year for a correct comparison.")
 
         st.caption(f"**Window:** {a['w_start']:%d %b %Y} – {a['w_end']:%d %b %Y}  ·  "
-                   f"**Compared with:** {a['p_start']:%d %b %Y} – {a['p_end']:%d %b %Y}")
+                   f"**Compared with:** {a['p_start']:%d %b %Y} – {a['p_end']:%d %b %Y} ({comp_label.lower()})")
+
+        if comparison == "previous" and months_w < 12:
+            ref = cl.seasonal_reference(df_sel, pi.cutoff, months_w, pi.data_start)
+            if ref is None:
+                st.warning("Seasonal reference not available: the uploaded files don't go back far enough "
+                           "to show how these two periods moved last year.")
+            else:
+                st.info(f"**Seasonal reference:** last year, these same two periods moved **{ref:+.1%}** "
+                        f"({a['w_start'] - pd.DateOffset(years=1):%d %b %Y} – {a['w_end'] - pd.DateOffset(years=1):%d %b %Y} "
+                        f"vs {a['p_start'] - pd.DateOffset(years=1):%d %b %Y} – {a['p_end'] - pd.DateOffset(years=1):%d %b %Y}). "
+                        "Read each customer's % against this: it is the normal seasonal swing, not a trend.")
 
         w_mt, p_mt = cls_df["window_mt"].sum(), cls_df["prior_mt"].sum()
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Window MT", f"{w_mt:,.0f}")
-        c2.metric("Same period last year", f"{p_mt:,.0f}")
+        c2.metric(comp_label, f"{p_mt:,.0f}")
         c3.metric("Change", f"{w_mt - p_mt:+,.0f} MT", f"{(w_mt / p_mt - 1):+.1%}" if p_mt else None)
         c4.metric("Customers invoiced in window", f"{(cls_df['window_mt'] > 0).sum():,}")
-        c5.metric("New / Total loss", f"{(cls_df['status'] == 'New').sum()} / {(cls_df['status'] == 'Total loss').sum()}")
+        c5.metric("New in window / Total loss",
+                  f"{(cls_df['status'] == 'New').sum()} / {(cls_df['status'] == 'Total loss').sum()}")
 
         summary = cl.status_summary(cls_df)
         st.plotly_chart(charts.status_bridge(summary, f"Where the change came from - {window_label}"),
@@ -168,7 +191,7 @@ def show():
             "⬇️ Customer trends (.xlsx)",
             _excel({"Summary": summary.assign(status=summary["status"].astype(str)),
                     "Customers": table[cols].assign(status=table["status"].astype(str))}),
-            file_name=f"customer_trends_{months_w}m_{pi.cutoff:%Y%m%d}.xlsx",
+            file_name=f"customer_trends_{months_w}m_{comparison}_{pi.cutoff:%Y%m%d}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -266,17 +289,20 @@ def show():
             st.caption(f"⚠️ The sum of customer forecasts is {diff:+.1%} vs the company-level model. "
                        "Check the largest customers below before using either figure for the budget.")
 
+        mix_all = _ft_mix(df, pi.cutoff)
+        mix_sel = mix_all[mix_all["customer"].isin(fc_sel.index)]
+
         # ── Customer table ──
         st.subheader("Forecast by customer")
         cust = (_month_cols(fc_sel.reindex(columns=fc_months))
                 .assign(**{"Total MT": fc_sel.sum(axis=1)})
-                .join(info_sel[["model", "history_months", "replaced_by_average"]])
+                .join(info_sel[["model", "history_months", "replaced_by_average", "size_change"]])
                 .join(attrs[["industry", "area"]])
                 .sort_values("Total MT", ascending=False))
         cust["model"] = cust["model"].fillna("No complete-month history")
         cust = cust.rename_axis("Customer").reset_index()
         lead = ["Customer", "industry", "area", "model", "history_months", "Total MT"]
-        cust = cust[lead + [c for c in cust.columns if c not in lead + ["replaced_by_average"]]]
+        cust = cust[lead + [c for c in cust.columns if c not in lead + ["replaced_by_average", "size_change"]]]
         st.dataframe(cust, hide_index=True, use_container_width=True,
                      column_config={c: st.column_config.NumberColumn(c, format="%,.1f")
                                     for c in cust.columns if c not in ("Customer", "industry", "area", "model", "history_months")})
@@ -286,8 +312,6 @@ def show():
         options = cust["Customer"].tolist()
         if options:
             who = st.selectbox("Customer", options)
-            share_months = st.radio("Item split based on the last", [6, 12], horizontal=True,
-                                    format_func=lambda n: f"{n} complete months")
             hist_c = mt_all.loc[who] if who in mt_all.index else pd.Series(0.0, index=hist_months)
             fc_c = fc_full.loc[who].reindex(fc_months) if who in fc_full.index else pd.Series(0.0, index=fc_months)
             st.plotly_chart(charts.customer_chart(hist_c, fc_c, who), use_container_width=True)
@@ -299,22 +323,54 @@ def show():
                 if r["replaced_by_average"]:
                     note += " · the 6-month average beat the trend model in the test, so the average is used"
                 st.caption(note)
-            items = md.item_split(df, who, fc_c, pi.last_complete_month, share_months)
-            if items.empty:
-                st.caption(f"No invoices in the last {share_months} complete months - no item split.")
+                if r["size_change"]:
+                    st.warning("**Size change detected:** this customer's last 6 months are 3x or more, or under a "
+                               "third, of the 12 months before. The model still uses the full history, which may no "
+                               "longer describe this customer - review this forecast before using it.")
+            fts = md.ft_split(mix_all, who, fc_c)
+            if fts.empty:
+                st.caption("No invoices in the last 12 months - no FT split.")
             else:
-                items = _month_cols(items).rename_axis("Item").reset_index()
-                st.dataframe(items, hide_index=True, use_container_width=True,
-                             column_config={"share": st.column_config.NumberColumn("Share", format="%.1%")} |
+                st.caption("FT split = each FT's share of this customer's MT over the last 12 months to the analysis date.")
+                fts = _month_cols(fts)
+                st.dataframe(fts, hide_index=True, use_container_width=True,
+                             column_config={"ft": "FT", "product_name": "Product name",
+                                            "share": st.column_config.NumberColumn("Share", format="%.1%"),
+                                            "months_invoiced": st.column_config.NumberColumn("Months invoiced (last 12)", format="%d"),
+                                            "last_invoiced": st.column_config.DateColumn("Last invoiced", format="DD MMM YYYY")} |
                                            {c: st.column_config.NumberColumn(c, format="%,.1f")
-                                            for c in items.columns if c not in ("Item", "share")})
+                                            for c in fts.columns if c not in ("ft", "product_name", "share",
+                                                                              "months_invoiced", "last_invoiced")})
 
-        # ── Export ──
-        shares_all = md.item_shares(df_sel, pi.last_complete_month, 6)
-        items_all = _month_cols(md.item_forecast(shares_all, fc_sel.reindex(columns=fc_months)))
+        # ── Export (live formulas: edit a customer in Excel and its FTs + totals follow) ──
+        notes = [
+            f"Demand forecast exported from the Quality Hub. Analysis date (last invoice): {pi.cutoff:%d %b %Y}.",
+            f"Models fitted on complete months {hist_months[0].strftime('%b %Y')} - {hist_months[-1].strftime('%b %Y')}.",
+            "HOW TO ADJUST: change the yellow month cells on the Customers sheet. The FT sheet and the Monthly total "
+            "sheet recalculate automatically. 'Model total MT' keeps the original model figure for comparison.",
+            "FT sheet: each FT = its share of the customer's MT over the last 12 months x the customer's month on the "
+            "Customers sheet. Every FT invoiced in those 12 months is included; check 'Months invoiced' and "
+            "'Last invoiced' for one-off FTs (e.g. National Day artwork).",
+            "Size change = Yes: the last 6 months are 3x+ or under a third of the 12 months before. The model "
+            "still uses the full history - review these customers before using their forecast.",
+        ]
+        if pi.is_partial:
+            notes.append(f"* {pi.cutoff_month.strftime('%b %Y')} is a partial month: its figure = MT invoiced up to "
+                         f"{pi.cutoff:%d %b %Y} + the forecast for the remaining days.")
+        if len(excluded):
+            notes.append("Excluded before analysis: " + "; ".join(
+                f"{sm} ({excluded.loc[excluded['salesman'].str.upper().str.strip() == sm, 'tons'].sum():,.1f} MT) - {why}"
+                for sm, why in clean.EXCLUDED_SALESMEN.items()))
+        if is_filtered:
+            notes.append(f"Filtered export: industry = {industries or 'all'}; area = {areas or 'all'}.")
+        cust_meta = info_sel[["model", "history_months", "size_change"]].join(attrs[["industry", "area"]], how="outer")
+        cust_meta = cust_meta.reindex(fc_sel.index)
+        cust_meta["model"] = cust_meta["model"].fillna("No complete-month history")
+        cust_meta["size_change"] = cust_meta["size_change"].fillna(False)
         st.download_button(
             "⬇️ Forecast workbook (.xlsx)",
-            _excel({"Monthly total": monthly, "Customers": cust, "Items (6-month mix)": items_all}),
+            export.build_workbook(cust_meta, fc_sel.reindex(columns=fc_months), mix_sel, fc_months,
+                                  tot_fc, eff_all.loc[fc_months], pi.cutoff_month if pi.is_partial else None, notes),
             file_name=f"demand_forecast_{pi.cutoff:%Y%m%d}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
@@ -337,6 +393,26 @@ def show():
         st.markdown(f"**Analysis date (last invoice):** {pi.cutoff:%d %b %Y} · "
                     f"**Complete months for models:** {pi.first_complete_month.strftime('%b %Y')} – {pi.last_complete_month.strftime('%b %Y')} "
                     f"({len(pd.period_range(pi.first_complete_month, pi.last_complete_month, freq='M'))} months)")
+
+        st.subheader("Excluded before analysis")
+        if excluded.empty:
+            st.caption("No invoice lines matched the exclusion list.")
+        else:
+            for sm, why in clean.EXCLUDED_SALESMEN.items():
+                ex = excluded[excluded["salesman"].str.upper().str.strip() == sm]
+                if ex.empty:
+                    continue
+                st.markdown(f"**{sm}** - {why}: **{len(ex):,} lines · {ex['tons'].sum():,.1f} MT · "
+                            f"{ex['customer_raw'].nunique()} customers**")
+                st.dataframe(
+                    ex.groupby("customer_raw").agg(lines=("tons", "size"), mt=("tons", "sum"),
+                                                   last_invoice=("inv_date", "max"))
+                      .sort_values("mt", ascending=False).rename_axis("Customer").reset_index(),
+                    hide_index=True, use_container_width=True,
+                    column_config={"lines": st.column_config.NumberColumn("Lines", format="%d"),
+                                   "mt": st.column_config.NumberColumn("MT", format="%,.2f"),
+                                   "last_invoice": st.column_config.DateColumn("Last invoice", format="DD MMM YYYY")})
+            st.caption("The exclusion list is in forecast/clean.py (EXCLUDED_SALESMEN).")
 
         st.subheader("Customer names merged")
         if merged_names.empty:
@@ -369,12 +445,16 @@ def show():
 
         with st.expander("Methodology notes"):
             st.markdown("""
-- **Forecast level:** each customer's monthly MT. Item forecasts are the customer forecast split by each
-  item's share of the last 6 or 12 complete months, because most item codes are too short-lived to model.
+- **Forecast level:** each customer's monthly MT. FT forecasts are the customer forecast split by each
+  FT's share of the customer's MT over the last 12 months, because most FTs are too short-lived to model.
+  Every FT invoiced in those 12 months is included - nothing is dropped.
 - **Model per customer:** no orders in the last 12 complete months → 0 · more than 40% empty months in
   the last 24 → TSB (intermittent demand) · under 12 months of history → 6-month average ·
   12–23 months → Holt with damped trend · 24+ months → Holt-Winters with damped trend and 12-month
   seasonality (additive or multiplicative, whichever fits better).
+- **Size change (flag for review):** customers whose last 6 months are 3x+ or under a third of the
+  12 months before are flagged. Their forecast is NOT changed: tested on Apr-Sep 2026, forcing an
+  average for them more than doubled the error, because most kept moving in the same direction.
 - **Accuracy test:** each model is refitted without the last 6 complete months and scored on them.
   If a plain 6-month average beats it, the average is used.
 - **Partial month:** excluded from model fitting; its forecast is the MT invoiced so far plus the
@@ -384,6 +464,10 @@ def show():
   February–April, so a Ramadan effect can't be separated from normal seasonality, which Holt-Winters
   already captures. No extra Ramadan uplift is applied.
 - **Returns / credit notes:** not in this export, so the history is gross invoiced MT.
-- **Trend windows** are date-based: the window ending on the last invoice date is compared with the
-  same dates one year earlier, so a partial month is always compared like-for-like.
+- **Trend windows** are date-based, ending on the last invoice date. "Same period last year" compares
+  with the same dates one year earlier (no seasonality). "Previous period" compares with the period
+  right before the window (recent momentum) and shows last year's swing between the same two periods
+  as a seasonal reference.
+- **Excluded lines:** salespeople in the exclusion list (forecast/clean.py) are removed before any
+  analysis; they are listed above with their MT.
             """)

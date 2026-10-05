@@ -13,7 +13,10 @@ Model per customer (decided by its own history, trimmed to its first invoice mon
                                                (additive or multiplicative, lower AICc)
 Accuracy test: refit on all but the last 6 complete months, forecast those 6, compare
 with the actuals. If a plain 6-month average beats the model in that test, the
-average is used instead. Pure functions - no Streamlit calls.
+average is used instead.
+Size change (last 6 months >= 3x or <= 1/3 of the 12 months before) is a FLAG for review only:
+tested on Apr-Sep 2026, forcing an average for these customers more than doubled their error
+(3,592 vs 1,835 MT), because most kept moving in the same direction. Pure functions - no Streamlit calls.
 """
 import warnings
 import numpy as np
@@ -27,6 +30,7 @@ INTERMITTENT_ZERO_SHARE = 0.40
 TSB_ALPHA = 0.10   # smoothing of order size
 TSB_BETA = 0.10    # smoothing of order probability
 AVG_MONTHS = 6
+SIZE_CHANGE_RATIO = 3.0   # flag: last-6-month average vs the 12 months before, >= 3x or <= 1/3
 
 MODEL_LABELS = {
     "zero": "No orders in 12 months",
@@ -48,6 +52,17 @@ def choose_kind(y: np.ndarray) -> str:
     if n < MIN_HW:
         return "holt"
     return "hw"
+
+
+def size_change(y: np.ndarray) -> bool:
+    """True if the last 6 months' level is >= 3x or <= 1/3 of the 12 months before them."""
+    if len(y) < 18:
+        return False
+    last6, prior12 = y[-6:].mean(), y[-18:-6].mean()
+    if prior12 <= 0:
+        return False
+    ratio = last6 / prior12
+    return ratio >= SIZE_CHANGE_RATIO or ratio <= 1 / SIZE_CHANGE_RATIO
 
 
 def _tsb(y: np.ndarray, h: int) -> np.ndarray:
@@ -114,9 +129,10 @@ def forecast_series(y: np.ndarray, h: int, eff_hist: np.ndarray) -> dict:
     eff_hist: effective days for the same months (to score the test in MT).
     """
     kind = choose_kind(y)
+    sc = kind in ("holt", "hw") and size_change(y)     # flag only - does not change the model
     result = {"kind_selected": kind, "test_abs_err": np.nan, "test_actual": np.nan,
               "test_forecast": np.nan, "test_err_model": np.nan, "test_err_avg": np.nan,
-              "replaced_by_average": False}
+              "replaced_by_average": False, "size_change": sc}
 
     if len(y) >= MIN_HOLT + TEST_MONTHS and kind != "zero":
         train, test = y[:-TEST_MONTHS], y[-TEST_MONTHS:]
@@ -129,17 +145,17 @@ def forecast_series(y: np.ndarray, h: int, eff_hist: np.ndarray) -> dict:
         if tot > 0:
             err_model = np.abs(actual_mt - model_mt).sum()
             err_avg = np.abs(actual_mt - avg_mt).sum()
-            use_avg = err_avg < err_model and kind != "average"
-            chosen_mt = avg_mt if use_avg else model_mt
+            beat = err_avg < err_model and kind != "average"
+            chosen_mt = avg_mt if beat else model_mt
             result.update(
                 test_err_model=err_model / tot,
                 test_err_avg=err_avg / tot,
-                replaced_by_average=bool(use_avg),
+                replaced_by_average=bool(beat),
                 test_abs_err=np.abs(actual_mt - chosen_mt).sum(),
                 test_actual=tot,
                 test_forecast=chosen_mt.sum(),
             )
-            if use_avg:
+            if beat:
                 kind = "average"
 
     f, used = _fit(y, h, kind)
@@ -173,10 +189,12 @@ def run_forecasts(mt: pd.DataFrame, eff_hist: pd.Series, eff_future: pd.Series) 
         e = eff_hist.values[nz[0]:]
         r = forecast_series(y, h, e)
         fc_rows[cust] = r["forecast_rate"] * eff_future.values
+        label = MODEL_LABELS[r["kind_used"]]
         info_rows.append({
             "customer": cust, "history_months": len(y),
-            "model": MODEL_LABELS[r["kind_used"]],
+            "model": label,
             "replaced_by_average": r["replaced_by_average"],
+            "size_change": r["size_change"],
             "test_error_model": r["test_err_model"], "test_error_average": r["test_err_avg"],
             "_abs_err": r["test_abs_err"], "_actual": r["test_actual"], "_fc": r["test_forecast"],
         })
@@ -203,34 +221,31 @@ def accuracy_summary(info: pd.DataFrame) -> dict:
     }
 
 
-def item_shares(df: pd.DataFrame, last_complete: pd.Period, share_months: int) -> pd.DataFrame:
-    """Every customer's item mix: MT share of each item over the last N complete months."""
-    months = pd.period_range(last_complete - share_months + 1, last_complete, freq="M")
-    d = df[df["inv_date"].dt.to_period("M").isin(months)]
-    s = d.groupby(["customer", "item"])["tons"].sum().reset_index()
-    s["share"] = s["tons"] / s.groupby("customer")["tons"].transform("sum")
-    return s[s["share"] > 0][["customer", "item", "share"]]
+def ft_mix(df: pd.DataFrame, cutoff: pd.Timestamp, months: int = 12) -> pd.DataFrame:
+    """
+    Every customer's FT mix: each FT's MT share of the customer's invoices in the last
+    `months` months up to the analysis date (a full year, so event FTs carry their annual
+    weight). Adds the latest product name, months invoiced and last invoice date per FT.
+    Nothing is excluded: every FT invoiced in the period gets its share.
+    """
+    start = cutoff - pd.DateOffset(months=months) + pd.Timedelta(days=1)
+    d = df[(df["inv_date"] >= start) & (df["inv_date"] <= cutoff)].sort_values("inv_date")
+    g = d.groupby(["customer", "ft"])
+    mix = g.agg(
+        mt=("tons", "sum"),
+        product_name=("item", "last"),
+        months_invoiced=("inv_date", lambda s: s.dt.to_period("M").nunique()),
+        last_invoiced=("inv_date", "max"),
+    ).reset_index()
+    total = mix.groupby("customer")["mt"].transform("sum")
+    mix["share"] = np.where(total > 0, mix["mt"] / total.where(total > 0), 0.0)
+    return mix.sort_values(["customer", "share"], ascending=[True, False]).reset_index(drop=True)
 
 
-def item_forecast(shares: pd.DataFrame, fc: pd.DataFrame) -> pd.DataFrame:
-    """Customer forecast x item share. Customers with no orders in the share window get no item rows."""
-    long = fc.stack().rename("customer_mt").reset_index()
-    long.columns = ["customer", "month", "customer_mt"]
-    out = shares.merge(long, on="customer")
-    out["item_mt"] = out["share"] * out["customer_mt"]
-    wide = out.pivot_table(index=["customer", "item", "share"], columns="month", values="item_mt", aggfunc="sum")
-    return wide.reset_index()
-
-
-def item_split(df: pd.DataFrame, customer: str, cust_fc: pd.Series,
-               last_complete: pd.Period, share_months: int) -> pd.DataFrame:
-    """Split one customer's forecast across items by each item's MT share of the last N complete months."""
-    months = pd.period_range(last_complete - share_months + 1, last_complete, freq="M")
-    d = df[(df["customer"] == customer) & df["inv_date"].dt.to_period("M").isin(months)]
-    share = d.groupby("item")["tons"].sum()
-    if share.sum() <= 0:
+def ft_split(mix: pd.DataFrame, customer: str, cust_fc: pd.Series) -> pd.DataFrame:
+    """One customer's forecast split across its FTs (share x customer forecast)."""
+    m = mix[mix["customer"] == customer]
+    if m.empty:
         return pd.DataFrame()
-    share = (share / share.sum()).sort_values(ascending=False)
-    out = pd.DataFrame(np.outer(share.values, cust_fc.values), index=share.index, columns=cust_fc.index)
-    out.insert(0, "share", share.values)
-    return out
+    vals = pd.DataFrame(np.outer(m["share"].values, cust_fc.values), columns=cust_fc.index, index=m.index)
+    return pd.concat([m[["ft", "product_name", "share", "months_invoiced", "last_invoiced"]], vals], axis=1)
