@@ -90,7 +90,7 @@ def default_sales_window(q_start, q_end, buffer_days: int = BUFFER_DAYS):
 def build_table(quotes: pd.DataFrame, orders: pd.DataFrame, p: Params) -> pd.DataFrame:
     """The PM's 'Quote to close' sheet: one row per Fact #."""
     cols = ["area", "customer", "item", "count", "quoted_mt", "avg_mt", "sales_mt", "last_quote_no",
-            "last_quote", "status", "salesman", "order_type", "delivery_lines"]
+            "last_quote", "status", "salesman", "order_type", "delivery_lines", "customer_key"]
     q = quotes[(quotes["quote_day"] >= p.quote_start) & (quotes["quote_day"] <= p.quote_end)].copy()
     if q.empty:
         return pd.DataFrame(columns=cols)
@@ -119,6 +119,7 @@ def build_table(quotes: pd.DataFrame, orders: pd.DataFrame, p: Params) -> pd.Dat
     t["sales_mt"] = t["sales_mt"].fillna(0.0)
     t["delivery_lines"] = t["delivery_lines"].fillna(0).astype(int)
     t["status"] = np.where(t["sales_mt"] > 0, "Closed", "Lost")
+    t["customer_key"] = t["customer"].astype(str).str.lower()    # one customer, whatever the upper/lower case
     t.index.name = "item"
     return t.reset_index()[cols]
 
@@ -225,6 +226,11 @@ GROUP_COLUMNS = [  # (key, label, kind) shown per area / salesman in the two-per
     ("sales", "Sales realised", "mt"), ("fill_quoted", "Fill (Sales/Quoted)", "pct"),
     ("fill_closed", "Fill (Sales/Closed)", "pct"),
 ]
+
+
+def customer_names(t: pd.DataFrame) -> dict:
+    """customer_key -> displayed name (first spelling in file order), like an Excel pivot."""
+    return t.groupby("customer_key", sort=False)["customer"].first().to_dict()
 
 
 def group_compare(ta: pd.DataFrame, tb: pd.DataFrame, by: str) -> pd.DataFrame:

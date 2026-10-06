@@ -164,8 +164,11 @@ def show():
     with tabs[4]:
         c0, c1 = st.columns([2, 1])
         mode = c0.radio("Compare", ["Two periods", "Monthly trend", "Quarterly trend"], horizontal=True)
-        view_by = c1.selectbox("Compare by", ["Total", "Area", "Salesman"])
-        by = {"Area": "area", "Salesman": "salesman"}.get(view_by)
+        view_by = c1.selectbox("Compare by", ["Total", "Area", "Salesman", "Customer"])
+        by = {"Area": "area", "Salesman": "salesman", "Customer": "customer_key"}.get(view_by)
+        full_cmp, _ = an.period_table(quotes, orders, quotes["quote_day"].min(), quotes["quote_day"].max(), int(days))
+        names = an.customer_names(full_cmp)
+        label_of = (lambda v: names.get(v, v)) if by == "customer_key" else (lambda v: v)
         st.caption(f"Same method for every period: its quotations, deliveries from the period start to the period "
                    f"end + {int(days)} days. Salesman = salesman on the Fact #'s latest quote line. "
                    "The sidebar area filter does not apply here - use 'Compare by'.")
@@ -186,10 +189,13 @@ def show():
                                                 an._with_period(an.summary(tb), par_b)),
                                  hide_index=True, use_container_width=True)
                 else:
-                    options = [f"All {view_by.lower()}s (one row each)"] + sorted(set(ta[by]) | set(tb[by]))
-                    pick = st.selectbox(view_by, options)
+                    all_label = f"All {view_by.lower()}s (one row each)"
+                    options = [all_label] + sorted(set(ta[by]) | set(tb[by]), key=lambda v: str(label_of(v)).lower())
+                    pick = st.selectbox(view_by, options, format_func=lambda v: v if v == all_label else label_of(v),
+                                        help="Type to search.")
                     if pick == options[0]:
                         g = an.group_compare(ta, tb, by)
+                        g[by] = g[by].map(label_of)
                         cfg = {by: view_by}
                         for key, label, kind in an.GROUP_COLUMNS:
                             for side in ("A", "B"):
@@ -216,9 +222,8 @@ def show():
         else:
             value = None
             if by:
-                full, _ = an.period_table(quotes, orders, quotes["quote_day"].min(), quotes["quote_day"].max(),
-                                          int(days))
-                value = st.selectbox(view_by, sorted(full[by].unique()))
+                value = st.selectbox(view_by, sorted(full_cmp[by].unique(), key=lambda v: str(label_of(v)).lower()),
+                                     format_func=label_of, help="Type to search.")
             t = an.trend(quotes, orders, "M" if mode == "Monthly trend" else "Q", int(days), by, value)
             done = t[t["complete"] & (t["total"] > 0)]
             fig = go.Figure()
@@ -228,7 +233,8 @@ def show():
                 fig.add_trace(go.Scatter(x=done["period"], y=done[key] * 100, name=name, mode="lines+markers",
                                          line=dict(color=color, width=2.5)))
             fig.update_layout(height=380, plot_bgcolor="white", hovermode="x unified", yaxis_title="%",
-                              title=dict(text=value or "All quotations", x=0, font=dict(size=14, color="#0D68A3")),
+                              title=dict(text=label_of(value) if value else "All quotations", x=0,
+                                         font=dict(size=14, color="#0D68A3")),
                               legend=dict(orientation="h", y=1.12, x=0), margin=dict(l=10, r=10, t=60, b=10))
             fig.update_yaxes(gridcolor="#EEEEEE", rangemode="tozero")
             st.plotly_chart(fig, use_container_width=True)
