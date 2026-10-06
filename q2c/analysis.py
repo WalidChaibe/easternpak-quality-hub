@@ -197,19 +197,56 @@ def calendar_periods(quotes: pd.DataFrame, freq: str):
     return out
 
 
-def period_summary(quotes, orders, q_start, q_end, buffer_days: int) -> dict:
+def period_table(quotes, orders, q_start, q_end, buffer_days: int):
+    """The Quote-to-close table of one period (sales window = period + buffer days) and its parameters."""
     s_start, s_end = default_sales_window(q_start, q_end, buffer_days)
     p = make_params(q_start, q_end, s_start, s_end, orders)
-    m = summary(build_table(quotes, orders, p))
+    return build_table(quotes, orders, p), p
+
+
+def _with_period(m: dict, p: Params) -> dict:
     m.update(quote_start=p.quote_start, quote_end=p.quote_end, sales_start=p.sales_start,
              sales_end=p.sales_end, complete=p.complete)
     return m
 
 
-def trend(quotes, orders, freq: str, buffer_days: int) -> pd.DataFrame:
+def period_summary(quotes, orders, q_start, q_end, buffer_days: int, by: str | None = None,
+                   value: str | None = None) -> dict:
+    """PM summary of one period; optionally only the Fact #s of one area / salesman."""
+    t, p = period_table(quotes, orders, q_start, q_end, buffer_days)
+    if by and value is not None:
+        t = t[t[by] == value]
+    return _with_period(summary(t), p)
+
+
+GROUP_COLUMNS = [  # (key, label, kind) shown per area / salesman in the two-period comparison
+    ("total", "Quotations", "int"), ("closed", "Closed", "int"), ("ratio", "Ratio (count)", "pct"),
+    ("quoted", "Quoted volume", "mt"), ("q_closed_pct", "Closed by volume %", "pct"),
+    ("sales", "Sales realised", "mt"), ("fill_quoted", "Fill (Sales/Quoted)", "pct"),
+    ("fill_closed", "Fill (Sales/Closed)", "pct"),
+]
+
+
+def group_compare(ta: pd.DataFrame, tb: pd.DataFrame, by: str) -> pd.DataFrame:
+    """One row per area / salesman: each metric for period A, period B and the change (B - A)."""
+    groups = sorted(set(ta[by]) | set(tb[by]))
+    rows = []
+    for g in groups:
+        ma, mb = summary(ta[ta[by] == g]), summary(tb[tb[by] == g])
+        row = {by: g}
+        for key, label, kind in GROUP_COLUMNS:
+            va, vb = ma[key], mb[key]
+            row[f"{label} A"], row[f"{label} B"] = va, vb
+            row[f"{label} Δ"] = (vb - va) if pd.notna(va) and pd.notna(vb) else np.nan
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    return out.sort_values(f"Quoted volume B", ascending=False).reset_index(drop=True)
+
+
+def trend(quotes, orders, freq: str, buffer_days: int, by: str | None = None, value: str | None = None) -> pd.DataFrame:
     rows = []
     for label, a, b in calendar_periods(quotes, freq):
-        m = period_summary(quotes, orders, a, b, buffer_days)
+        m = period_summary(quotes, orders, a, b, buffer_days, by, value)
         m["period"] = label
         rows.append(m)
     return pd.DataFrame(rows)

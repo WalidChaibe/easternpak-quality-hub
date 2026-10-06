@@ -162,13 +162,14 @@ def show():
 
     # ════════ Compare periods ════════
     with tabs[4]:
-        mode = st.radio("Compare", ["Two periods", "Monthly trend", "Quarterly trend"], horizontal=True)
+        c0, c1 = st.columns([2, 1])
+        mode = c0.radio("Compare", ["Two periods", "Monthly trend", "Quarterly trend"], horizontal=True)
+        view_by = c1.selectbox("Compare by", ["Total", "Area", "Salesman"])
+        by = {"Area": "area", "Salesman": "salesman"}.get(view_by)
         st.caption(f"Same method for every period: its quotations, deliveries from the period start to the period "
-                   f"end + {int(days)} days." + (" The area filter applies." if areas else ""))
-        quotes_cmp = quotes
-        if areas:
-            keep = set(table_all.loc[table_all["area"].isin(areas), "customer"])
-            quotes_cmp = quotes[quotes["customer"].isin(keep)]
+                   f"end + {int(days)} days. Salesman = salesman on the Fact #'s latest quote line. "
+                   "The sidebar area filter does not apply here - use 'Compare by'.")
+
         if mode == "Two periods":
             qs = an.calendar_periods(quotes, "Q")
             qa, qb = qs[0], (qs[1] if len(qs) > 1 else qs[0])
@@ -178,17 +179,48 @@ def show():
             pb = c2.date_input("Period B (quotes)", value=(qb[1].date(), min(qb[2].date(), q_max)),
                                min_value=q_min, max_value=q_max)
             if isinstance(pa, tuple) and len(pa) == 2 and isinstance(pb, tuple) and len(pb) == 2:
-                ma = an.period_summary(quotes_cmp, orders, pa[0], pa[1], int(days))
-                mb = an.period_summary(quotes_cmp, orders, pb[0], pb[1], int(days))
-                st.dataframe(_compare_table(ma, mb), hide_index=True, use_container_width=True)
-                if not (ma["complete"] and mb["complete"]):
-                    st.warning("A period marked ⚠️ has a sales window that ends after the SC export date - "
-                               "its numbers may still change.")
+                ta, par_a = an.period_table(quotes, orders, pa[0], pa[1], int(days))
+                tb, par_b = an.period_table(quotes, orders, pb[0], pb[1], int(days))
+                if by is None:
+                    st.dataframe(_compare_table(an._with_period(an.summary(ta), par_a),
+                                                an._with_period(an.summary(tb), par_b)),
+                                 hide_index=True, use_container_width=True)
+                else:
+                    options = [f"All {view_by.lower()}s (one row each)"] + sorted(set(ta[by]) | set(tb[by]))
+                    pick = st.selectbox(view_by, options)
+                    if pick == options[0]:
+                        g = an.group_compare(ta, tb, by)
+                        cfg = {by: view_by}
+                        for key, label, kind in an.GROUP_COLUMNS:
+                            for side in ("A", "B"):
+                                fmt = "%.1%" if kind == "pct" else ("%d" if kind == "int" else "%,.0f")
+                                cfg[f"{label} {side}"] = st.column_config.NumberColumn(f"{label} {side}", format=fmt)
+                            if kind == "pct":
+                                g[f"{label} Δ"] = g[f"{label} Δ"] * 100
+                                cfg[f"{label} Δ"] = st.column_config.NumberColumn(f"{label} Δ (pts)", format="%+.1f")
+                            else:
+                                cfg[f"{label} Δ"] = st.column_config.NumberColumn(
+                                    f"{label} Δ", format="%+d" if kind == "int" else "%+,.0f")
+                        st.caption(f"A = quotes {par_a.quote_start:%d %b} – {par_a.quote_end:%d %b %Y} · "
+                                   f"B = quotes {par_b.quote_start:%d %b} – {par_b.quote_end:%d %b %Y}. "
+                                   "Sorted by quoted volume in B.")
+                        st.dataframe(g, hide_index=True, use_container_width=True, column_config=cfg)
+                    else:
+                        st.dataframe(_compare_table(an._with_period(an.summary(ta[ta[by] == pick]), par_a),
+                                                    an._with_period(an.summary(tb[tb[by] == pick]), par_b)),
+                                     hide_index=True, use_container_width=True)
+                if not (par_a.complete and par_b.complete):
+                    st.warning("A period's sales window ends after the SC export date - its numbers may still change.")
             else:
                 st.info("Pick a start and an end date for both periods.")
         else:
-            t = an.trend(quotes_cmp, orders, "M" if mode == "Monthly trend" else "Q", int(days))
-            done = t[t["complete"]]
+            value = None
+            if by:
+                full, _ = an.period_table(quotes, orders, quotes["quote_day"].min(), quotes["quote_day"].max(),
+                                          int(days))
+                value = st.selectbox(view_by, sorted(full[by].unique()))
+            t = an.trend(quotes, orders, "M" if mode == "Monthly trend" else "Q", int(days), by, value)
+            done = t[t["complete"] & (t["total"] > 0)]
             fig = go.Figure()
             for key, name, color in (("ratio", "Quote-to-close ratio (by count) %", "#0D68A3"),
                                      ("a_closed_pct", "Quotation closed by AVG volume %", "#2E8449"),
@@ -196,7 +228,8 @@ def show():
                 fig.add_trace(go.Scatter(x=done["period"], y=done[key] * 100, name=name, mode="lines+markers",
                                          line=dict(color=color, width=2.5)))
             fig.update_layout(height=380, plot_bgcolor="white", hovermode="x unified", yaxis_title="%",
-                              legend=dict(orientation="h", y=1.12, x=0), margin=dict(l=10, r=10, t=40, b=10))
+                              title=dict(text=value or "All quotations", x=0, font=dict(size=14, color="#0D68A3")),
+                              legend=dict(orientation="h", y=1.12, x=0), margin=dict(l=10, r=10, t=60, b=10))
             fig.update_yaxes(gridcolor="#EEEEEE", rangemode="tozero")
             st.plotly_chart(fig, use_container_width=True)
             show_t = t.assign(complete=t["complete"].map({True: "Yes", False: "No ⚠️"}),
