@@ -57,8 +57,8 @@ def _read(content: bytes, name: str, columns: dict, date_col: str, count_col: st
     df[columns[date_col]] = dates[dates.notna()]
     df["mt"] = pd.to_numeric(df["mt"], errors="coerce").fillna(0.0)
     for c in df.columns:
-        if df[c].dtype == object:
-            df[c] = df[c].astype("string").str.strip().fillna("")
+        if c not in (columns[date_col], "mt") and not pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = df[c].astype("string").str.strip().fillna("")      # trims e.g. 'Central ' -> 'Central'
     mt = float(df["mt"].sum())
     check = FileCheck(name, len(df), int(len(footer)), count,
                       None if count is None else count == len(df),
