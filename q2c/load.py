@@ -17,7 +17,7 @@ RFQ_COLUMNS = {
 }
 SC_COLUMNS = {
     "Order Type": "order_type", "SC #": "sc_no", "Order ID": "order_id", "Fact #": "item",
-    "Issue Date": "order_date", "Customer": "customer", "MT": "mt", "Satus": "status",
+    "Issue Date": "order_date", "Del Date": "delivery_date", "Customer": "customer", "MT": "mt", "Satus": "status",
     "Salesman": "salesman",
 }
 
@@ -57,7 +57,7 @@ def _read(content: bytes, name: str, columns: dict, date_col: str, count_col: st
     df[columns[date_col]] = dates[dates.notna()]
     df["mt"] = pd.to_numeric(df["mt"], errors="coerce").fillna(0.0)
     for c in df.columns:
-        if c not in (columns[date_col], "mt") and not pd.api.types.is_numeric_dtype(df[c]):
+        if c not in (columns[date_col], "mt", "delivery_date") and not pd.api.types.is_numeric_dtype(df[c]):
             df[c] = df[c].astype("string").str.strip().fillna("")      # trims e.g. 'Central ' -> 'Central'
     mt = float(df["mt"].sum())
     check = FileCheck(name, len(df), int(len(footer)), count,
@@ -78,5 +78,6 @@ def read_rfq(content: bytes, name: str):
 def read_sc(content: bytes, name: str):
     df, check = _read(content, name, SC_COLUMNS, "Issue Date", "SC #", "sales order (SC)")
     df["order_day"] = df["order_date"].dt.normalize()
+    df["delivery_day"] = pd.to_datetime(df["delivery_date"], errors="coerce").dt.normalize()
     df["sc_no"] = df["sc_no"].astype(str).str.replace(r"\.0$", "", regex=True)
     return df, check

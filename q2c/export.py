@@ -1,10 +1,12 @@
 """
-Quote-to-close workbook. Every KPI is a live formula, so each number can be traced:
-  Quote lines / Order lines  - the raw lines used (values)
-  Items                      - one row per Fact #: Count, AVG, dates, Sales Qty, Status are FORMULAS
-                               over Quote lines / Order lines and the Parameters sheet
-  Summary + breakdowns       - COUNTIFS / SUMIFS over Items
-Changing 'Days allowed for orders' on the Parameters sheet recalculates everything.
+Quote-to-close workbook in the PM's layout (Summary / Pivot / Quote to close / Raw data), every number a
+live formula:
+  Raw data        - the quote lines used (values)
+  Sales lines     - the SC order lines of those Fact #s (values)
+  Quote to close  - one row per Fact #: Count, Quoted Qty, AVG, Sales Qty, Status are FORMULAS
+  Pivot / By Area - SUMIFS over Quote to close
+  Summary         - the PM's Summary rows as formulas
+Changing the sales window on the Parameters sheet recalculates everything.
 Pure functions - no Streamlit calls.
 """
 import io
@@ -17,14 +19,15 @@ BLUE = PatternFill("solid", fgColor="0D68A3")
 WHITE_BOLD = Font(bold=True, color="FFFFFF")
 BOLD = Font(bold=True)
 TITLE = Font(bold=True, size=14, color="0D68A3")
-PARAM_FILL = PatternFill("solid", fgColor="FFF8E1")
+EDIT = PatternFill("solid", fgColor="FFF8E1")
 MT, PCT, DATE, INT = "#,##0.00", "0.0%", "DD MMM YYYY", "#,##0"
-
-P_CUTOFF = "Parameters!$B$4"
+QTC = "'Quote to close'"
+RAW = "'Raw data'"
+SL = "'Sales lines'"
 
 
 def _crit(text: str) -> str:
-    """Excel criteria literal: escape wildcards (* ? ~) and quotes, so 'Nova ... Co)*' matches only itself."""
+    """Excel criteria literal: escape wildcards (* ? ~) and quotes so a name only matches itself."""
     t = str(text).replace("~", "~~").replace("*", "~*").replace("?", "~?").replace('"', '""')
     return f'"{t}"'
 
@@ -39,242 +42,168 @@ def _header(ws, row, headers, widths=None):
             ws.column_dimensions[get_column_letter(j)].width = w
 
 
-def _fmt(ws, col, fmt, r1, r2):
-    for r in range(r1, r2 + 1):
-        ws.cell(row=r, column=col).number_format = fmt
+def _pivot_sheet(wb, name, title, key_col, keys):
+    ws = wb.create_sheet(name)
+    ws["A1"], ws["A1"].font = title, TITLE
+    _header(ws, 3, [name.replace("By ", "") if name != "Pivot" else "Customer", "Sum of Count",
+                    "Sum of Quoted Qty", "Sum of AVG MT / Quote", "Sum of Sales Qty", "Fill rate (Sales / Quoted)"],
+            [55, 12, 16, 18, 16, 16])
+    col = f"{QTC}!${key_col}:${key_col}"
+    r = 4
+    for k in keys:
+        cr = _crit(k)
+        ws.cell(row=r, column=1, value=str(k))
+        ws.cell(row=r, column=2, value=f"=SUMIFS({QTC}!$D:$D,{col},{cr})")
+        ws.cell(row=r, column=3, value=f"=SUMIFS({QTC}!$E:$E,{col},{cr})")
+        ws.cell(row=r, column=4, value=f"=SUMIFS({QTC}!$F:$F,{col},{cr})")
+        ws.cell(row=r, column=5, value=f"=SUMIFS({QTC}!$G:$G,{col},{cr})")
+        ws.cell(row=r, column=6, value=f'=IFERROR(E{r}/C{r},"")')
+        r += 1
+    ws.cell(row=r, column=1, value="Grand Total")
+    for j, L in zip(range(2, 6), "BCDE"):
+        ws.cell(row=r, column=j, value=f"=SUM({L}4:{L}{r - 1})")
+    ws.cell(row=r, column=6, value=f'=IFERROR(E{r}/C{r},"")')
+    for rr in range(4, r + 1):
+        ws.cell(row=rr, column=2).number_format = INT
+        for j in (3, 4, 5):
+            ws.cell(row=rr, column=j).number_format = MT
+        ws.cell(row=rr, column=6).number_format = PCT
+    for j in range(1, 7):
+        ws.cell(row=r, column=j).font = BOLD
+    ws.freeze_panes = "A4"
 
 
-def build_workbook(items: pd.DataFrame, quote_lines: pd.DataFrame, order_lines: pd.DataFrame,
-                   waste_lines: pd.DataFrame, params, title_period: str, files_note: str,
-                   excluded_note: str = "") -> bytes:
+def build_workbook(table: pd.DataFrame, quote_lines: pd.DataFrame, sales_lines: pd.DataFrame,
+                   params, pivot_customers: list, pivot_areas: list, files_note: str) -> bytes:
     wb = Workbook()
-    n = len(items)
-    last = n + 1                                   # last data row on Items
 
-    # ── Parameters ──
-    wp = wb.active
-    wp.title = "Parameters"
-    rows = [("Parameter", "Value", "Meaning"),
-            ("Quote period start", params.period_start.to_pydatetime(), "Quotes issued on or after this date (Quote lines sheet already filtered)"),
-            ("Quote period end", params.period_end.to_pydatetime(), "Quotes issued on or before this date"),
-            ("Orders counted up to", "=MIN(B3+B5,B6)", "Period end + days allowed, but not later than the last order in the SC file"),
-            ("Days allowed for orders", params.buffer_days, "Days after the period end in which orders still count (editable; 20 = 90% of orders)"),
-            ("Last order date in SC file", params.last_order_day.to_pydatetime(), "If 'Orders counted up to' is earlier than period end + days allowed, the period is incomplete")]
-    for i, r in enumerate(rows, start=1):
-        for j, v in enumerate(r, start=1):
-            wp.cell(row=i, column=j, value=v)
-    _header(wp, 1, rows[0], [22, 16, 90])
-    for r in (2, 3, 4, 6):
-        wp.cell(row=r, column=2).number_format = DATE
-    wp.cell(row=5, column=2).fill = PARAM_FILL
-    wp["A8"] = "Period complete?"
-    wp["B8"] = '=IF(B3+B5<=B6,"Yes","No - some items may still order")'
-
-    # ── Quote lines ──
-    wq = wb.create_sheet("Quote lines")
-    qcols = ["Quote #", "Item (Fact #)", "Customer", "Order type", "Quote date", "Salesman", "MT", "Area", "Product group"]
-    _header(wq, 1, qcols, [12, 12, 40, 16, 13, 22, 10, 18, 18])
-    for rec in quote_lines.itertuples(index=False):
-        wq.append([rec.quote_no, rec.item, rec.customer, rec.order_type, rec.quote_day.to_pydatetime(),
-                   rec.salesman, float(rec.mt), rec.area, rec.product_group])
-    _fmt(wq, 5, DATE, 2, len(quote_lines) + 1)
-    _fmt(wq, 7, MT, 2, len(quote_lines) + 1)
-    wq.freeze_panes = "A2"
-    wq.auto_filter.ref = f"A1:I{len(quote_lines) + 1}"
-
-    # ── Order lines ──
-    wo = wb.create_sheet("Order lines")
-    ocols = ["Item (Fact #)", "SC #", "Order ID", "Order type", "Status", "Order date", "MT", "Customer"]
-    _header(wo, 1, ocols, [12, 12, 18, 16, 20, 13, 10, 40])
-    for rec in order_lines.itertuples(index=False):
-        wo.append([rec.item, rec.sc_no, rec.order_id, rec.order_type, rec.status,
-                   rec.order_day.to_pydatetime(), float(rec.mt), rec.customer])
-    _fmt(wo, 6, DATE, 2, len(order_lines) + 1)
-    _fmt(wo, 7, MT, 2, len(order_lines) + 1)
-    wo.freeze_panes = "A2"
-    wo.auto_filter.ref = f"A1:H{len(order_lines) + 1}"
-
-    # ── Items (formulas) ──
-    wi = wb.create_sheet("Items")
-    icols = ["Item (Fact #)", "Customer", "Area", "Product group", "Salesman", "Latest order type", "Product",
-             "Count (quotes)", "AVG Qty/Quote (MT)", "First quote", "Last quote", "Last quote #",
-             "Sales Qty (MT)", "Order lines", "Status", "Var (MT)", "Quotes sent"]
-    _header(wi, 1, icols, [12, 40, 18, 18, 22, 16, 30, 9, 12, 13, 13, 12, 12, 9, 9, 11, 10])
-    QL, OL = "'Quote lines'", "'Order lines'"
-    for r, rec in enumerate(items.itertuples(index=False), start=2):
-        wi.append([
-            rec.item, rec.customer, rec.area, rec.product_group, rec.salesman, rec.latest_order_type, rec.product,
-            f"=COUNTIFS({QL}!$B:$B,$A{r})",
-            f"=AVERAGEIFS({QL}!$G:$G,{QL}!$B:$B,$A{r})",
-            f"=_xlfn.MINIFS({QL}!$E:$E,{QL}!$B:$B,$A{r})",
-            f"=_xlfn.MAXIFS({QL}!$E:$E,{QL}!$B:$B,$A{r})",
-            rec.last_quote_no,
-            f'=SUMIFS({OL}!$G:$G,{OL}!$A:$A,$A{r},{OL}!$F:$F,">="&$J{r},{OL}!$F:$F,"<="&{P_CUTOFF})',
-            f'=COUNTIFS({OL}!$A:$A,$A{r},{OL}!$F:$F,">="&$J{r},{OL}!$F:$F,"<="&{P_CUTOFF})',
-            f'=IF($M{r}>0,"Closed","Lost")',
-            f"=$M{r}-$I{r}",
-            f'=IF($H{r}>=5,"5 or more",TEXT($H{r},"0"))',
-        ])
-    for col, fmt in ((9, MT), (10, DATE), (11, DATE), (13, MT), (16, MT)):
-        _fmt(wi, col, fmt, 2, last)
-    wi.freeze_panes = "B2"
-    wi.auto_filter.ref = f"A1:Q{last}"
-    I = "Items"
-
-    # ── Summary ──
-    ws = wb.create_sheet("Summary", 0)
-    ws["A1"], ws["A1"].font = "Eastern Pak — RFQ Quote-to-Close Analysis", TITLE
-    ws["A2"] = f"{title_period}  |  {files_note}"
-    ws["A3"] = "Every value below is a formula - see the 'How calculated' sheet for each definition."
-    _header(ws, 5, ["Key metric", "Value", "", "Quotation effort", "Value"], [46, 16, 3, 44, 14])
-    left = [
-        ("FTs quoted (unique items)", f"=COUNTA({I}!$A:$A)-1", INT),                                   # B6
-        ("Closed (at least one order, Sales Qty > 0)", f'=COUNTIF({I}!$O:$O,"Closed")', INT),       # B7
-        ("Lost (no order)", f'=COUNTIF({I}!$O:$O,"Lost")', INT),                                    # B8
-        ("Quote-to-close ratio (Closed ÷ FTs quoted)", "=IFERROR(B7/B6,0)", PCT),                   # B9
-        ("Total quoted volume (sum of AVG Qty/Quote)", f"=SUM({I}!$I:$I)", MT),                     # B10
-        ("  of which closed FTs", f'=SUMIFS({I}!$I:$I,{I}!$O:$O,"Closed")', MT),                    # B11
-        ("  of which lost FTs (lost quoted volume)", f'=SUMIFS({I}!$I:$I,{I}!$O:$O,"Lost")', MT),   # B12
-        ("Total sales volume (sum of all order lines)", f"=SUM({I}!$M:$M)", MT),                    # B13
-        ("Volume fill rate (Sales ÷ Total quoted)", "=IFERROR(B13/B10,0)", PCT),                    # B14
-        ("Sold ÷ quoted, closed FTs only", "=IFERROR(B13/B11,0)", PCT),                             # B15
+    # ── Summary (the PM's rows) ──
+    ws = wb.active
+    ws.title = "Summary"
+    ws["A1"], ws["A1"].font = "Quote-to-Close Summary", TITLE
+    ws["A2"] = (f"Quotes {params.quote_start:%d %b %Y} – {params.quote_end:%d %b %Y} · deliveries "
+                f"{params.sales_start:%d %b %Y} – {params.sales_end:%d %b %Y}  |  {files_note}")
+    _header(ws, 4, ["Key Metric", "Value", "% of total"], [48, 16, 12])
+    rows = [
+        (5, "Total Quotations (line items)", f"=COUNTA({QTC}!$C:$C)-1", INT, None),
+        (6, "Quotations Closed (>= 1 order)", f'=COUNTIF({QTC}!$J:$J,"Closed")', INT, None),
+        (7, "Quotations Lost (zero sales)", f'=COUNTIF({QTC}!$J:$J,"Lost")', INT, None),
+        (8, "Quote-to-Close Ratio (by count)", "=IFERROR(B6/B5,0)", PCT, None),
+        (10, "Total Quoted Volume", f"=SUM({QTC}!$E:$E)", MT, None),
+        (12, "Quotation closed (by volume)", f'=SUMIFS({QTC}!$E:$E,{QTC}!$J:$J,"Closed")', MT, "=IFERROR(B12/B10,0)"),
+        (13, "Quotation lost (by volume)", f'=SUMIFS({QTC}!$E:$E,{QTC}!$J:$J,"Lost")', MT, "=IFERROR(B13/B10,0)"),
+        (14, "Total Sales Volume Realised", f"=SUM({QTC}!$G:$G)", MT, None),
+        (15, "Volume Fill Rate (Sales / Quoted volume)", "=IFERROR(B14/B10,0)", PCT, None),
+        (16, "Volume Fill Rate (Sales / Quotation closed)", "=IFERROR(B14/B12,0)", PCT, None),
+        (18, "Sum of AVG Quoted volume", f"=SUM({QTC}!$F:$F)", MT, None),
+        (19, "Quotation closed (by AVG volume)", f'=SUMIFS({QTC}!$F:$F,{QTC}!$J:$J,"Closed")', MT, "=IFERROR(B19/B18,0)"),
+        (20, "Quotation lost (by AVG volume)", f'=SUMIFS({QTC}!$F:$F,{QTC}!$J:$J,"Lost")', MT, "=IFERROR(B20/B18,0)"),
     ]
-    right = [
-        ("Avg # quotations sent — closed FTs", f'=IFERROR(AVERAGEIFS({I}!$H:$H,{I}!$O:$O,"Closed"),0)', "0.00"),
-        ("Avg # quotations sent — lost FTs", f'=IFERROR(AVERAGEIFS({I}!$H:$H,{I}!$O:$O,"Lost"),0)', "0.00"),
-        ("Lost FTs quoted only once", f'=COUNTIFS({I}!$O:$O,"Lost",{I}!$H:$H,1)', INT),
-        ("Lost FTs quoted 2+ times, still no order", f'=COUNTIFS({I}!$O:$O,"Lost",{I}!$H:$H,">=2")', INT),
-        ("  … as % of all lost FTs", "=IFERROR(E9/B8,0)", PCT),
-    ]
-    for i, (label, f, fmt) in enumerate(left, start=6):
-        ws.cell(row=i, column=1, value=label)
-        c = ws.cell(row=i, column=2, value=f)
-        c.number_format = fmt
-    for i, (label, f, fmt) in enumerate(right, start=6):
-        ws.cell(row=i, column=4, value=label)
-        c = ws.cell(row=i, column=5, value=f)
-        c.number_format = fmt
-    ws["A17"] = "Check: closed + lost quoted volume = total quoted volume"
-    ws["B17"] = '=IF(ABS(B11+B12-B10)<0.001,"OK","CHECK")'
-    ws["A19"], ws["A19"].font = "Waste sales quotes (Order Type 'Open Waste Order') - NOT in the KPIs above", BOLD
-    ws["A20"], ws["B20"] = "Quote lines", "=COUNTA('Waste quotes'!$A:$A)-1"
-    ws["A21"], ws["B21"] = "Quoted MT", "=SUM('Waste quotes'!$G:$G)"
-    ws["B21"].number_format = MT
-    ws["A22"] = "Period complete?"
+    for r, label, f, fmt, pct in rows:
+        ws.cell(row=r, column=1, value=label)
+        ws.cell(row=r, column=2, value=f).number_format = fmt
+        if pct:
+            ws.cell(row=r, column=3, value=pct).number_format = PCT
+    ws["A22"] = "Sales window complete?"
     ws["B22"] = "=Parameters!B8"
-    if excluded_note:
-        ws["A24"] = excluded_note
-
-    # ── Breakdown sheets (COO layout) ──
-    def breakdown(name, title, col_letter, categories):
-        b = wb.create_sheet(name)
-        b["A1"], b["A1"].font = title, TITLE
-        _header(b, 3, [name.replace("By ", ""), "Quotes", "Closed", "Lost", "Close rate %",
-                       "Qty quoted (MT)", "Qty sold (MT)", "Fill rate %"], [40, 9, 9, 9, 12, 15, 15, 11])
-        col = f"{I}!${col_letter}:${col_letter}"
-        r = 4
-        for cat in categories:
-            cr = _crit(cat)
-            b.cell(row=r, column=1, value=str(cat))
-            b.cell(row=r, column=2, value=f"=COUNTIFS({col},{cr})")
-            b.cell(row=r, column=3, value=f'=COUNTIFS({col},{cr},{I}!$O:$O,"Closed")')
-            b.cell(row=r, column=4, value=f'=COUNTIFS({col},{cr},{I}!$O:$O,"Lost")')
-            b.cell(row=r, column=5, value=f'=IFERROR(C{r}/B{r},"")')
-            b.cell(row=r, column=6, value=f"=SUMIFS({I}!$I:$I,{col},{cr})")
-            b.cell(row=r, column=7, value=f"=SUMIFS({I}!$M:$M,{col},{cr})")
-            b.cell(row=r, column=8, value=f'=IFERROR(G{r}/F{r},"")')
-            r += 1
-        b.cell(row=r, column=1, value="TOTAL")
-        for j, L in zip((2, 3, 4, 6, 7), "BCDFG"):
-            b.cell(row=r, column=j, value=f"=SUM({L}4:{L}{r - 1})")
-        b.cell(row=r, column=5, value=f'=IFERROR(C{r}/B{r},"")')
-        b.cell(row=r, column=8, value=f'=IFERROR(G{r}/F{r},"")')
-        for rr in range(4, r + 1):
-            for j, fmt in ((5, PCT), (6, MT), (7, MT), (8, PCT)):
-                b.cell(row=rr, column=j).number_format = fmt
-        for j in range(1, 9):
-            b.cell(row=r, column=j).font = BOLD
-        b.freeze_panes = "A4"
-
-    order = lambda col: items.groupby(col)["avg_mt"].sum().sort_values(ascending=False).index.tolist()
-    breakdown("By Area", "Quote-to-Close by Area", "C", order("area"))
-    breakdown("By Product Group", "Quote-to-Close by Product Group (export field 'Box Style Group')", "D", order("product_group"))
-    breakdown("By Salesman", "Quote-to-Close by Salesman", "E", order("salesman"))
-    breakdown("By Order Type", "Quote-to-Close by Latest Quote Order Type", "F", order("latest_order_type"))
-    breakdown("By Quotation Count", "Quote-to-Close by Number of Quotations Sent", "Q", ["1", "2", "3", "4", "5 or more"])
-
-    # ── Top lost ──
-    tl = wb.create_sheet("Top Lost Opportunities")
-    tl["A1"], tl["A1"].font = "Top 15 Customers by Lost Quoted Volume", TITLE
-    tl["A2"] = "FTs with Status = Lost (no order from first quote up to the 'Orders counted up to' date)."
-    _header(tl, 3, ["Customer", "# Lost items", "Lost quoted volume (MT)"], [55, 13, 22])
-    lost = items[items["status"] == "Lost"].groupby("customer")["avg_mt"].sum().sort_values(ascending=False).head(15)
-    for r, cust in enumerate(lost.index, start=4):
-        cr = _crit(cust)
-        tl.cell(row=r, column=1, value=cust)
-        tl.cell(row=r, column=2, value=f'=COUNTIFS({I}!$B:$B,{cr},{I}!$O:$O,"Lost")')
-        tl.cell(row=r, column=3, value=f'=SUMIFS({I}!$I:$I,{I}!$B:$B,{cr},{I}!$O:$O,"Lost")').number_format = MT
-
-    # ── Repeated quotes, no order ──
-    rq = wb.create_sheet("Repeated Quotes - No Order")
-    rep = items[(items["status"] == "Lost") & (items["count"] >= 2)].sort_values(["count", "avg_mt"], ascending=False)
-    rq["A1"], rq["A1"].font = "Quoted 2+ Times, Still No Order", TITLE
-    rq["A2"] = (f"{len(rep)} items (list as of the export). To refresh after changing Parameters: "
-                "filter Items on Status = Lost and Count >= 2.")
-    _header(rq, 3, ["Area", "Customer", "Item", "Product group", "# Quotations sent", "Avg Qty/Quote (MT)",
-                    "Salesman", "Last quotation date"], [18, 45, 12, 18, 12, 14, 22, 14])
-    for r, rec in enumerate(rep.itertuples(index=False), start=4):
-        rq.append([rec.area, rec.customer, rec.item, rec.product_group, int(rec.count), float(rec.avg_mt),
-                   rec.salesman, rec.last_quote.to_pydatetime()])
-        rq.cell(row=r, column=6).number_format = MT
-        rq.cell(row=r, column=8).number_format = DATE
-
-    # ── Waste quotes ──
-    ww = wb.create_sheet("Waste quotes")
-    _header(ww, 1, qcols, [12, 12, 40, 16, 13, 22, 10, 18, 18])
-    for rec in waste_lines.itertuples(index=False):
-        ww.append([rec.quote_no, rec.item, rec.customer, rec.order_type, rec.quote_day.to_pydatetime(),
-                   rec.salesman, float(rec.mt), rec.area, rec.product_group])
-    _fmt(ww, 5, DATE, 2, len(waste_lines) + 1)
-    _fmt(ww, 7, MT, 2, len(waste_lines) + 1)
 
     # ── How calculated ──
-    hc = wb.create_sheet("How calculated", 1)
-    hc["A1"], hc["A1"].font = "How every number is calculated", TITLE
-    _header(hc, 3, ["Number", "Definition", "Formula", "Value"], [36, 70, 55, 14])
+    hc = wb.create_sheet("How calculated")
+    hc["A1"], hc["A1"].font = "How every number is calculated (the PM's method)", TITLE
+    _header(hc, 3, ["Number", "Definition"], [40, 110])
     defs = [
-        ("FT (item)", "One Fact # quoted in the period (packaging quotes only).", "Quote lines, one row per Fact #", "=Summary!B6"),
-        ("Count (quotes)", "Number of quote lines for the FT in the period.", "COUNTIFS(Quote lines Item = FT)", None),
-        ("AVG Qty/Quote", "Average MT of those quote lines = the FT's quoted volume.", "AVERAGEIFS(Quote lines MT, Item = FT)", None),
-        ("Sales Qty", "SUM of the MT of ALL order lines for the FT, entered from its first quote date up to "
-         "'Orders counted up to' (period end + days allowed).",
-         "SUMIFS(Order lines MT, Item = FT, Order date >= First quote, Order date <= Orders counted up to)", None),
-        ("Closed", "Sales Qty > 0 (at least one order).", "Status = Closed", "=Summary!B7"),
-        ("Lost", "Sales Qty = 0 (no order).", "Status = Lost", "=Summary!B8"),
-        ("Quote-to-close ratio", "Closed ÷ FTs quoted.", "Summary!B7 / Summary!B6", "=Summary!B9"),
-        ("Total quoted volume", "Sum of AVG Qty/Quote over all FTs = closed FTs + lost FTs.", "SUM(Items AVG Qty/Quote)", "=Summary!B10"),
-        ("Lost quoted volume", "Quoted volume of the lost FTs: offered, never ordered.", "SUMIFS(AVG Qty/Quote, Status = Lost)", "=Summary!B12"),
-        ("Total sales volume", "Sum of Sales Qty over all FTs.", "SUM(Items Sales Qty)", "=Summary!B13"),
-        ("Volume fill rate", "Sales ÷ total quoted. Can exceed 100%: one quote can lead to several orders (repeat releases).",
-         "Summary!B13 / Summary!B10", "=Summary!B14"),
-        ("Sold ÷ quoted, closed FTs", "Sales ÷ quoted volume of the closed FTs only - how much closed FTs ordered vs their quote.",
-         "Summary!B13 / Summary!B11", "=Summary!B15"),
-        ("Days allowed for orders", "Measured on 2026 data: 90.0% of orders are entered within 20 days of the quote.",
-         "Parameters!B5", "=Parameters!B5"),
-        ("Waste sales quotes", "Order Type 'Open Waste Order' (scrap cartons, plastic, steel) - not packaging demand, "
-         "kept out of the KPIs and listed on 'Waste quotes'.", "Waste quotes sheet", "=Summary!B21"),
-        ("Area / Product group / Salesman", "Area and Product group from the FT's first quote line; Salesman and "
-         "Latest order type from its most recent quote line. 'Product group' is the export's Box Style Group.", "", None),
+        ("Quotation (line item)", "One Fact # quoted in the quote period. All order types and salesmen are included."),
+        ("Area", "The customer's Area in the quote export, except the customers re-labelled by the PM "
+                 "(Petrochemical, Consumer Area, Central Procurement, …)."),
+        ("Customer", "The customer on the Fact #'s first quote line."),
+        ("Count", "Number of quote lines for the Fact # = COUNTIFS(Raw data Fact #)."),
+        ("Quoted Qty", "SUM of MT of all its quote lines = SUMIFS(Raw data MT)."),
+        ("AVG MT / Quote", "Quoted Qty ÷ Count."),
+        ("Sales Qty", "SUM of MT of all SC order lines for the Fact # with Delivery date inside the sales window "
+                      "(Parameters B4–B5) = SUMIFS(Sales lines MT)."),
+        ("Closed / Lost", "Closed if Sales Qty > 0, Lost if Sales Qty = 0."),
+        ("Quote-to-Close Ratio (by count)", "Closed ÷ Total quotations."),
+        ("Quotation closed / lost (by volume)", "Quoted Qty of the closed / lost Fact #s, and its % of Total Quoted Volume."),
+        ("Volume Fill Rate (Sales / Quoted volume)", "Total Sales ÷ Total Quoted Volume."),
+        ("Volume Fill Rate (Sales / Quotation closed)", "Total Sales ÷ Quoted Qty of the closed Fact #s."),
+        ("Quotation closed / lost (by AVG volume)", "The same split using AVG MT / Quote instead of Quoted Qty."),
+        ("Last quote # / Date", "The Trans # and Issue Date of the Fact #'s latest quote line."),
     ]
-    for r, (a, b_, c, d) in enumerate(defs, start=4):
+    for r, (a, b) in enumerate(defs, start=4):
         hc.cell(row=r, column=1, value=a).font = BOLD
-        hc.cell(row=r, column=2, value=b_).alignment = Alignment(wrap_text=True, vertical="top")
-        hc.cell(row=r, column=3, value=c).alignment = Alignment(wrap_text=True, vertical="top")
-        if d:
-            cell = hc.cell(row=r, column=4, value=d)
-            cell.number_format = (PCT if a in ("Quote-to-close ratio", "Volume fill rate", "Sold ÷ quoted, closed FTs")
-                                  else MT if ("volume" in a.lower() or "Waste" in a) else INT)
+        hc.cell(row=r, column=2, value=b).alignment = Alignment(wrap_text=True, vertical="top")
 
+    # ── Parameters ──
+    wp = wb.create_sheet("Parameters")
+    prm = [("Parameter", "Value", "Meaning"),
+           ("Quote period start", params.quote_start.to_pydatetime(), "Raw data sheet already filtered to this period"),
+           ("Quote period end", params.quote_end.to_pydatetime(), ""),
+           ("Sales window start (delivery date)", params.sales_start.to_pydatetime(), "Editable"),
+           ("Sales window end (delivery date)", params.sales_end.to_pydatetime(), "Editable"),
+           ("SC export date (last order entered)", params.export_day.to_pydatetime(), "")]
+    for i, r in enumerate(prm, start=1):
+        for j, v in enumerate(r, start=1):
+            wp.cell(row=i, column=j, value=v)
+    _header(wp, 1, prm[0], [34, 16, 60])
+    for r in range(2, 7):
+        wp.cell(row=r, column=2).number_format = DATE
+    for r in (4, 5):
+        wp.cell(row=r, column=2).fill = EDIT
+    wp["A8"] = "Sales window complete?"
+    wp["B8"] = '=IF(B5<=B6,"Yes","No - window ends after the SC export date")'
+
+    # ── Quote to close (formulas) ──
+    wq = wb.create_sheet("Quote to close")
+    _header(wq, 1, ["Area", "Customer", "Fact #", "Count", "Quoted Qty", "AVG MT / Quote", "Sales Qty",
+                    "Last quote #", "Date", "Status"], [18, 45, 12, 8, 12, 14, 12, 13, 13, 9])
+    for r, rec in enumerate(table.itertuples(index=False), start=2):
+        wq.append([rec.area, rec.customer, rec.item,
+                   f"=COUNTIFS({RAW}!$B:$B,$C{r})",
+                   f"=SUMIFS({RAW}!$E:$E,{RAW}!$B:$B,$C{r})",
+                   f"=IFERROR(E{r}/D{r},0)",
+                   f'=SUMIFS({SL}!$F:$F,{SL}!$A:$A,$C{r},{SL}!$E:$E,">="&Parameters!$B$4,{SL}!$E:$E,"<="&Parameters!$B$5)',
+                   rec.last_quote_no, rec.last_quote.to_pydatetime(),
+                   f'=IF(G{r}>0,"Closed","Lost")'])
+        for j, fmt in ((5, MT), (6, MT), (7, MT), (9, DATE)):
+            wq.cell(row=r, column=j).number_format = fmt
+    wq.freeze_panes = "A2"
+    wq.auto_filter.ref = f"A1:J{len(table) + 1}"
+
+    # ── Pivots ──
+    _pivot_sheet(wb, "Pivot", "Quote-to-Close by Customer (fill rate, highest first)", "B", pivot_customers)
+    _pivot_sheet(wb, "By Area", "Quote-to-Close by Area", "A", pivot_areas)
+
+    # ── Raw data ──
+    wr = wb.create_sheet("Raw data")
+    _header(wr, 1, ["Trans #", "Fact #", "Issue Date", "Customer", "MT", "Area", "Order Type", "Salesman"],
+            [12, 12, 13, 45, 10, 18, 16, 24])
+    for rec in quote_lines.itertuples(index=False):
+        wr.append([rec.quote_no, rec.item, rec.quote_day.to_pydatetime(), rec.customer, float(rec.mt), rec.area,
+                   rec.order_type, rec.salesman])
+    for r in range(2, len(quote_lines) + 2):
+        wr.cell(row=r, column=3).number_format = DATE
+        wr.cell(row=r, column=5).number_format = MT
+    wr.freeze_panes = "A2"
+    wr.auto_filter.ref = f"A1:H{len(quote_lines) + 1}"
+
+    # ── Sales lines ──
+    ws2 = wb.create_sheet("Sales lines")
+    _header(ws2, 1, ["Fact #", "SC #", "Order ID", "Order date", "Delivery date", "MT", "Customer", "Order type",
+                     "Status"], [12, 12, 18, 13, 13, 10, 45, 16, 20])
+    for rec in sales_lines.itertuples(index=False):
+        ws2.append([rec.item, rec.sc_no, rec.order_id, rec.order_day.to_pydatetime(),
+                    rec.delivery_day.to_pydatetime() if pd.notna(rec.delivery_day) else None,
+                    float(rec.mt), rec.customer, rec.order_type, rec.status])
+    for r in range(2, len(sales_lines) + 2):
+        ws2.cell(row=r, column=4).number_format = DATE
+        ws2.cell(row=r, column=5).number_format = DATE
+        ws2.cell(row=r, column=6).number_format = MT
+    ws2.freeze_panes = "A2"
+    ws2.auto_filter.ref = f"A1:I{len(sales_lines) + 1}"
+
+    order = ["Summary", "Pivot", "By Area", "Quote to close", "Raw data", "Sales lines", "Parameters", "How calculated"]
+    wb._sheets = [wb[n] for n in order]
+    wb.active = 0
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
