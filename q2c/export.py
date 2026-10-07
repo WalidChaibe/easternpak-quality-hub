@@ -2,8 +2,8 @@
 Quote-to-close workbook in the PM's layout (Summary / Pivot / Quote to close / Raw data), every number a
 live formula:
   Raw data        - the quote lines used (values)
-  Sales lines     - the SC order lines of those Fact #s (values)
-  Quote to close  - one row per Fact #: Count, Quoted Qty, AVG, Sales Qty, Status are FORMULAS
+  Sales lines     - the invoice lines of those Fact #s (values)
+  Quote to close  - one row per Fact #: Count, Quoted Qty, AVG, Sales Qty, Status, Invoiced value are FORMULAS
   Pivot / By Area - SUMIFS over Quote to close
   Summary         - the PM's Summary rows as formulas
 Changing the sales window on the Parameters sheet recalculates everything.
@@ -46,8 +46,8 @@ def _pivot_sheet(wb, name, title, key_col, keys):
     ws = wb.create_sheet(name)
     ws["A1"], ws["A1"].font = title, TITLE
     _header(ws, 3, [name.replace("By ", "") if name != "Pivot" else "Customer", "Sum of Count",
-                    "Sum of Quoted Qty", "Sum of AVG MT / Quote", "Sum of Sales Qty", "Fill rate (Sales / Quoted)"],
-            [55, 12, 16, 18, 16, 16])
+                    "Sum of Quoted Qty", "Sum of AVG MT / Quote", "Sum of Sales Qty", "Fill rate (Sales / Quoted)",
+                    "Sum of Invoiced value"], [55, 12, 16, 18, 16, 16, 18])
     col = f"{QTC}!${key_col}:${key_col}"
     r = 4
     for k in keys:
@@ -58,17 +58,20 @@ def _pivot_sheet(wb, name, title, key_col, keys):
         ws.cell(row=r, column=4, value=f"=SUMIFS({QTC}!$F:$F,{col},{cr})")
         ws.cell(row=r, column=5, value=f"=SUMIFS({QTC}!$G:$G,{col},{cr})")
         ws.cell(row=r, column=6, value=f'=IFERROR(E{r}/C{r},"")')
+        ws.cell(row=r, column=7, value=f"=SUMIFS({QTC}!$K:$K,{col},{cr})")
         r += 1
     ws.cell(row=r, column=1, value="Grand Total")
     for j, L in zip(range(2, 6), "BCDE"):
         ws.cell(row=r, column=j, value=f"=SUM({L}4:{L}{r - 1})")
     ws.cell(row=r, column=6, value=f'=IFERROR(E{r}/C{r},"")')
+    ws.cell(row=r, column=7, value=f"=SUM(G4:G{r - 1})")
     for rr in range(4, r + 1):
         ws.cell(row=rr, column=2).number_format = INT
         for j in (3, 4, 5):
             ws.cell(row=rr, column=j).number_format = MT
         ws.cell(row=rr, column=6).number_format = PCT
-    for j in range(1, 7):
+        ws.cell(row=rr, column=7).number_format = "#,##0"
+    for j in range(1, 8):
         ws.cell(row=r, column=j).font = BOLD
     ws.freeze_panes = "A4"
 
@@ -81,7 +84,7 @@ def build_workbook(table: pd.DataFrame, quote_lines: pd.DataFrame, sales_lines: 
     ws = wb.active
     ws.title = "Summary"
     ws["A1"], ws["A1"].font = "Quote-to-Close Summary", TITLE
-    ws["A2"] = (f"Quotes {params.quote_start:%d %b %Y} – {params.quote_end:%d %b %Y} · deliveries "
+    ws["A2"] = (f"Quotes {params.quote_start:%d %b %Y} – {params.quote_end:%d %b %Y} · invoices "
                 f"{params.sales_start:%d %b %Y} – {params.sales_end:%d %b %Y}  |  {files_note}")
     _header(ws, 4, ["Key Metric", "Value", "% of total"], [48, 16, 12])
     rows = [
@@ -98,14 +101,15 @@ def build_workbook(table: pd.DataFrame, quote_lines: pd.DataFrame, sales_lines: 
         (18, "Sum of AVG Quoted volume", f"=SUM({QTC}!$F:$F)", MT, None),
         (19, "Quotation closed (by AVG volume)", f'=SUMIFS({QTC}!$F:$F,{QTC}!$J:$J,"Closed")', MT, "=IFERROR(B19/B18,0)"),
         (20, "Quotation lost (by AVG volume)", f'=SUMIFS({QTC}!$F:$F,{QTC}!$J:$J,"Lost")', MT, "=IFERROR(B20/B18,0)"),
+        (22, "Total Invoiced Value (Invoice Amount)", f"=SUM({QTC}!$K:$K)", "#,##0", None),
     ]
     for r, label, f, fmt, pct in rows:
         ws.cell(row=r, column=1, value=label)
         ws.cell(row=r, column=2, value=f).number_format = fmt
         if pct:
             ws.cell(row=r, column=3, value=pct).number_format = PCT
-    ws["A22"] = "Sales window complete?"
-    ws["B22"] = "=Parameters!B8"
+    ws["A24"] = "Sales window complete?"
+    ws["B24"] = "=Parameters!B8"
 
     # ── How calculated ──
     hc = wb.create_sheet("How calculated")
@@ -119,8 +123,9 @@ def build_workbook(table: pd.DataFrame, quote_lines: pd.DataFrame, sales_lines: 
         ("Count", "Number of quote lines for the Fact # = COUNTIFS(Raw data Fact #)."),
         ("Quoted Qty", "SUM of MT of all its quote lines = SUMIFS(Raw data MT)."),
         ("AVG MT / Quote", "Quoted Qty ÷ Count."),
-        ("Sales Qty", "SUM of MT of all SC order lines for the Fact # with Delivery date inside the sales window "
-                      "(Parameters B4–B5) = SUMIFS(Sales lines MT)."),
+        ("Sales Qty", "SUM of invoiced MT (Shipped Tons) for the Fact # with Invoice date inside the sales window "
+                      "(Parameters B4–B5) = SUMIFS(Sales lines MT). 'Fact Tic NB' in the invoice files is the Fact #."),
+        ("Invoiced value", "SUM of Invoice Amount of the same invoice lines."),
         ("Closed / Lost", "Closed if Sales Qty > 0, Lost if Sales Qty = 0."),
         ("Quote-to-Close Ratio (by count)", "Closed ÷ Total quotations."),
         ("Quotation closed / lost (by volume)", "Quoted Qty of the closed / lost Fact #s, and its % of Total Quoted Volume."),
@@ -138,9 +143,9 @@ def build_workbook(table: pd.DataFrame, quote_lines: pd.DataFrame, sales_lines: 
     prm = [("Parameter", "Value", "Meaning"),
            ("Quote period start", params.quote_start.to_pydatetime(), "Raw data sheet already filtered to this period"),
            ("Quote period end", params.quote_end.to_pydatetime(), ""),
-           ("Sales window start (delivery date)", params.sales_start.to_pydatetime(), "Editable"),
-           ("Sales window end (delivery date)", params.sales_end.to_pydatetime(), "Editable"),
-           ("SC export date (last order entered)", params.export_day.to_pydatetime(), "")]
+           ("Sales window start (invoice date)", params.sales_start.to_pydatetime(), "Editable"),
+           ("Sales window end (invoice date)", params.sales_end.to_pydatetime(), "Editable"),
+           ("Last invoice date in the files", params.export_day.to_pydatetime(), "")]
     for i, r in enumerate(prm, start=1):
         for j, v in enumerate(r, start=1):
             wp.cell(row=i, column=j, value=v)
@@ -150,24 +155,25 @@ def build_workbook(table: pd.DataFrame, quote_lines: pd.DataFrame, sales_lines: 
     for r in (4, 5):
         wp.cell(row=r, column=2).fill = EDIT
     wp["A8"] = "Sales window complete?"
-    wp["B8"] = '=IF(B5<=B6,"Yes","No - window ends after the SC export date")'
+    wp["B8"] = '=IF(B5<=B6,"Yes","No - window ends after the last invoice date")'
 
     # ── Quote to close (formulas) ──
     wq = wb.create_sheet("Quote to close")
     _header(wq, 1, ["Area", "Customer", "Fact #", "Count", "Quoted Qty", "AVG MT / Quote", "Sales Qty",
-                    "Last quote #", "Date", "Status"], [18, 45, 12, 8, 12, 14, 12, 13, 13, 9])
+                    "Last quote #", "Date", "Status", "Invoiced value"], [18, 45, 12, 8, 12, 14, 12, 13, 13, 9, 14])
     for r, rec in enumerate(table.itertuples(index=False), start=2):
         wq.append([rec.area, rec.customer, rec.item,
                    f"=COUNTIFS({RAW}!$B:$B,$C{r})",
                    f"=SUMIFS({RAW}!$E:$E,{RAW}!$B:$B,$C{r})",
                    f"=IFERROR(E{r}/D{r},0)",
-                   f'=SUMIFS({SL}!$F:$F,{SL}!$A:$A,$C{r},{SL}!$E:$E,">="&Parameters!$B$4,{SL}!$E:$E,"<="&Parameters!$B$5)',
+                   f'=SUMIFS({SL}!$D:$D,{SL}!$A:$A,$C{r},{SL}!$C:$C,">="&Parameters!$B$4,{SL}!$C:$C,"<="&Parameters!$B$5)',
                    rec.last_quote_no, rec.last_quote.to_pydatetime(),
-                   f'=IF(G{r}>0,"Closed","Lost")'])
-        for j, fmt in ((5, MT), (6, MT), (7, MT), (9, DATE)):
+                   f'=IF(G{r}>0,"Closed","Lost")',
+                   f'=SUMIFS({SL}!$E:$E,{SL}!$A:$A,$C{r},{SL}!$C:$C,">="&Parameters!$B$4,{SL}!$C:$C,"<="&Parameters!$B$5)'])
+        for j, fmt in ((5, MT), (6, MT), (7, MT), (9, DATE), (11, "#,##0")):
             wq.cell(row=r, column=j).number_format = fmt
     wq.freeze_panes = "A2"
-    wq.auto_filter.ref = f"A1:J{len(table) + 1}"
+    wq.auto_filter.ref = f"A1:K{len(table) + 1}"
 
     # ── Pivots ──
     _pivot_sheet(wb, "Pivot", "Quote-to-Close by Customer (fill rate, highest first)", "B", pivot_customers)
@@ -186,20 +192,19 @@ def build_workbook(table: pd.DataFrame, quote_lines: pd.DataFrame, sales_lines: 
     wr.freeze_panes = "A2"
     wr.auto_filter.ref = f"A1:H{len(quote_lines) + 1}"
 
-    # ── Sales lines ──
+    # ── Sales lines (invoices) ──
     ws2 = wb.create_sheet("Sales lines")
-    _header(ws2, 1, ["Fact #", "SC #", "Order ID", "Order date", "Delivery date", "MT", "Customer", "Order type",
-                     "Status"], [12, 12, 18, 13, 13, 10, 45, 16, 20])
+    _header(ws2, 1, ["Fact #", "Invoice #", "Invoice date", "MT (Shipped Tons)", "Invoice Amount", "Customer",
+                     "MFG Code", "SC #"], [12, 15, 13, 14, 14, 45, 12, 12])
     for rec in sales_lines.itertuples(index=False):
-        ws2.append([rec.item, rec.sc_no, rec.order_id, rec.order_day.to_pydatetime(),
-                    rec.delivery_day.to_pydatetime() if pd.notna(rec.delivery_day) else None,
-                    float(rec.mt), rec.customer, rec.order_type, rec.status])
+        ws2.append([rec.item, rec.inv_no, rec.sale_day.to_pydatetime(), float(rec.mt), float(rec.amount),
+                    rec.customer, rec.mfg_code, rec.sc_no])
     for r in range(2, len(sales_lines) + 2):
-        ws2.cell(row=r, column=4).number_format = DATE
-        ws2.cell(row=r, column=5).number_format = DATE
-        ws2.cell(row=r, column=6).number_format = MT
+        ws2.cell(row=r, column=3).number_format = DATE
+        ws2.cell(row=r, column=4).number_format = "#,##0.000"
+        ws2.cell(row=r, column=5).number_format = "#,##0.00"
     ws2.freeze_panes = "A2"
-    ws2.auto_filter.ref = f"A1:I{len(sales_lines) + 1}"
+    ws2.auto_filter.ref = f"A1:H{len(sales_lines) + 1}"
 
     order = ["Summary", "Pivot", "By Area", "Quote to close", "Raw data", "Sales lines", "Parameters", "How calculated"]
     wb._sheets = [wb[n] for n in order]

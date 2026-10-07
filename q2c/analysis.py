@@ -9,19 +9,21 @@ Per Fact # quoted in the quote period (all order types, all salesmen - nothing f
   Count         = number of quote lines
   Quoted Qty    = SUM of MT of all quote lines
   AVG MT/Quote  = Quoted Qty / Count
-  Sales Qty     = SUM of MT of all SC order lines for that Fact # with DELIVERY date in the sales window
+  Sales Qty     = SUM of invoiced MT ('Shipped Tons') for that Fact # with INVOICE date in the sales window
+                  (Invoice Detail exports; their 'Fact Tic NB' column is the Fact #)
+  Invoiced value = SUM of 'Invoice Amount' of the same invoice lines
   Last quote #, Date = the latest quote line
 Closed = Sales Qty > 0, Lost = Sales Qty = 0.
 
-Checked against his workbook (quotes 1 Jan - 2 Sep 2026, deliveries 1 Jan - 31 Aug 2026): Area, Customer,
-Count, Quoted Qty, AVG, Last quote # and Date match on all 5,077 Fact #s; Sales Qty matches exactly on
-4,737 (the SC export used here is newer than his - deliveries re-dated / orders added since).
+Checked against his workbook: Area, Customer, Count, Quoted Qty, AVG, Last quote # and Date match on all
+5,077 Fact #s. Sales now come from invoices ("$1 earned = $1 invoiced"), at the PM's request.
 """
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-BUFFER_DAYS = 20          # default sales window = quote period + 20 days (90.0% of orders within 20 days)
+BUFFER_DAYS = 20          # default sales window = quote period + 20 days (the PM's rule).
+# Measured on 2026 data, share of first invoices within N days of the quote: 20d 79.6% · 30d 89.3% · 35d 91.8%
 STATUSES = ["Closed", "Lost"]
 
 # The PM's own Area labels (customers he re-labels; everyone else keeps the export's Area).
@@ -62,35 +64,35 @@ class Params:
     quote_end: pd.Timestamp
     sales_start: pd.Timestamp
     sales_end: pd.Timestamp
-    export_day: pd.Timestamp       # last order entry date in the SC export ("today" of that file)
+    export_day: pd.Timestamp       # last invoice date in the uploaded invoice files
 
     @property
     def complete(self) -> bool:
-        """The sales window has fully passed by the time the SC file was exported."""
+        """The invoice files reach the end of the sales window."""
         return self.sales_end <= self.export_day
 
 
-def make_params(q_start, q_end, s_start, s_end, orders: pd.DataFrame) -> Params:
+def make_params(q_start, q_end, s_start, s_end, sales: pd.DataFrame) -> Params:
     ts = lambda d: pd.Timestamp(d).normalize()
-    return Params(ts(q_start), ts(q_end), ts(s_start), ts(s_end), orders["order_day"].max().normalize())
+    return Params(ts(q_start), ts(q_end), ts(s_start), ts(s_end), sales["sale_day"].max().normalize())
 
 
-def default_quote_period(quotes: pd.DataFrame, orders: pd.DataFrame, buffer_days: int = BUFFER_DAYS):
-    """From the first quote in the file to 20 days before the SC export date."""
+def default_quote_period(quotes: pd.DataFrame, sales: pd.DataFrame, buffer_days: int = BUFFER_DAYS):
+    """From the first quote in the file to 20 days before the last invoice date."""
     start = quotes["quote_day"].min()
-    end = min(quotes["quote_day"].max(), orders["order_day"].max().normalize() - pd.Timedelta(days=buffer_days))
+    end = min(quotes["quote_day"].max(), sales["sale_day"].max().normalize() - pd.Timedelta(days=buffer_days))
     return start, max(end, start)
 
 
 def default_sales_window(q_start, q_end, buffer_days: int = BUFFER_DAYS):
-    """Deliveries from the quote period start to the quote period end + 20 days."""
+    """Invoices from the quote period start to the quote period end + 20 days."""
     return pd.Timestamp(q_start), pd.Timestamp(q_end) + pd.Timedelta(days=buffer_days)
 
 
-def build_table(quotes: pd.DataFrame, orders: pd.DataFrame, p: Params) -> pd.DataFrame:
+def build_table(quotes: pd.DataFrame, sales: pd.DataFrame, p: Params) -> pd.DataFrame:
     """The PM's 'Quote to close' sheet: one row per Fact #."""
     cols = ["area", "customer", "item", "count", "quoted_mt", "avg_mt", "sales_mt", "last_quote_no",
-            "last_quote", "status", "salesman", "order_type", "delivery_lines", "customer_key"]
+            "last_quote", "status", "salesman", "order_type", "invoice_lines", "sales_value", "customer_key"]
     q = quotes[(quotes["quote_day"] >= p.quote_start) & (quotes["quote_day"] <= p.quote_end)].copy()
     if q.empty:
         return pd.DataFrame(columns=cols)
@@ -112,12 +114,11 @@ def build_table(quotes: pd.DataFrame, orders: pd.DataFrame, p: Params) -> pd.Dat
     t["avg_mt"] = t["quoted_mt"] / t["count"]
     t["area"] = [PM_AREA_OVERRIDES.get(c, cust_area.get(c, "")) for c in t["customer"]]
 
-    o = orders[orders["item"].isin(t.index) & (orders["delivery_day"] >= p.sales_start)
-               & (orders["delivery_day"] <= p.sales_end)]
-    agg = o.groupby("item").agg(sales_mt=("mt", "sum"), delivery_lines=("mt", "size"))
+    o = sales[sales["item"].isin(t.index) & (sales["sale_day"] >= p.sales_start) & (sales["sale_day"] <= p.sales_end)]
+    agg = o.groupby("item").agg(sales_mt=("mt", "sum"), sales_value=("amount", "sum"), invoice_lines=("mt", "size"))
     t = t.join(agg)
-    t["sales_mt"] = t["sales_mt"].fillna(0.0)
-    t["delivery_lines"] = t["delivery_lines"].fillna(0).astype(int)
+    t[["sales_mt", "sales_value"]] = t[["sales_mt", "sales_value"]].fillna(0.0)
+    t["invoice_lines"] = t["invoice_lines"].fillna(0).astype(int)
     t["status"] = np.where(t["sales_mt"] > 0, "Closed", "Lost")
     t["customer_key"] = t["customer"].astype(str).str.lower()    # one customer, whatever the upper/lower case
     t.index.name = "item"
@@ -146,6 +147,7 @@ def summary(t: pd.DataFrame) -> dict:
         "avg": avg,
         "a_closed": a_closed, "a_closed_pct": _r(a_closed, avg),
         "a_lost": a_lost, "a_lost_pct": _r(a_lost, avg),
+        "sales_value": float(t["sales_value"].sum()),
     }
 
 
@@ -163,6 +165,7 @@ SUMMARY_ROWS = [   # (label as in the PM's Summary sheet, value key, % key, kind
     ("Sum of AVG Quoted volume", "avg", None, "mt"),
     ("Quotation closed (by AVG volume)", "a_closed", "a_closed_pct", "mt"),
     ("Quotation lost (by AVG volume)", "a_lost", "a_lost_pct", "mt"),
+    ("Total Invoiced Value (Invoice Amount)", "sales_value", None, "val"),
 ]
 
 
@@ -176,7 +179,7 @@ def pivot(t: pd.DataFrame, by: str = "customer") -> pd.DataFrame:
     t[by] = key.map(t.groupby(key)[by].first())
     g = t.groupby(by)
     pv = pd.DataFrame({"count": g["count"].sum(), "quoted_mt": g["quoted_mt"].sum(), "avg_mt": g["avg_mt"].sum(),
-                       "sales_mt": g["sales_mt"].sum(), "items": g.size(),
+                       "sales_mt": g["sales_mt"].sum(), "sales_value": g["sales_value"].sum(), "items": g.size(),
                        "closed": g["status"].apply(lambda s: (s == "Closed").sum())})
     pv["fill_rate"] = (pv["sales_mt"] / pv["quoted_mt"]).where(pv["quoted_mt"] > 0)
     pv = pv.sort_values("fill_rate", ascending=False, na_position="last")
@@ -198,11 +201,11 @@ def calendar_periods(quotes: pd.DataFrame, freq: str):
     return out
 
 
-def period_table(quotes, orders, q_start, q_end, buffer_days: int):
+def period_table(quotes, sales, q_start, q_end, buffer_days: int):
     """The Quote-to-close table of one period (sales window = period + buffer days) and its parameters."""
     s_start, s_end = default_sales_window(q_start, q_end, buffer_days)
-    p = make_params(q_start, q_end, s_start, s_end, orders)
-    return build_table(quotes, orders, p), p
+    p = make_params(q_start, q_end, s_start, s_end, sales)
+    return build_table(quotes, sales, p), p
 
 
 def _with_period(m: dict, p: Params) -> dict:
@@ -211,10 +214,10 @@ def _with_period(m: dict, p: Params) -> dict:
     return m
 
 
-def period_summary(quotes, orders, q_start, q_end, buffer_days: int, by: str | None = None,
+def period_summary(quotes, sales, q_start, q_end, buffer_days: int, by: str | None = None,
                    value: str | None = None) -> dict:
     """PM summary of one period; optionally only the Fact #s of one area / salesman."""
-    t, p = period_table(quotes, orders, q_start, q_end, buffer_days)
+    t, p = period_table(quotes, sales, q_start, q_end, buffer_days)
     if by and value is not None:
         t = t[t[by] == value]
     return _with_period(summary(t), p)
@@ -223,7 +226,8 @@ def period_summary(quotes, orders, q_start, q_end, buffer_days: int, by: str | N
 GROUP_COLUMNS = [  # (key, label, kind) shown per area / salesman in the two-period comparison
     ("total", "Quotations", "int"), ("closed", "Closed", "int"), ("ratio", "Ratio (count)", "pct"),
     ("quoted", "Quoted volume", "mt"), ("q_closed_pct", "Closed by volume %", "pct"),
-    ("sales", "Sales realised", "mt"), ("fill_quoted", "Fill (Sales/Quoted)", "pct"),
+    ("sales", "Sales realised", "mt"), ("sales_value", "Invoiced value", "val"),
+    ("fill_quoted", "Fill (Sales/Quoted)", "pct"),
     ("fill_closed", "Fill (Sales/Closed)", "pct"),
 ]
 
@@ -249,10 +253,10 @@ def group_compare(ta: pd.DataFrame, tb: pd.DataFrame, by: str) -> pd.DataFrame:
     return out.sort_values(f"Quoted volume B", ascending=False).reset_index(drop=True)
 
 
-def trend(quotes, orders, freq: str, buffer_days: int, by: str | None = None, value: str | None = None) -> pd.DataFrame:
+def trend(quotes, sales, freq: str, buffer_days: int, by: str | None = None, value: str | None = None) -> pd.DataFrame:
     rows = []
     for label, a, b in calendar_periods(quotes, freq):
-        m = period_summary(quotes, orders, a, b, buffer_days, by, value)
+        m = period_summary(quotes, sales, a, b, buffer_days, by, value)
         m["period"] = label
         rows.append(m)
     return pd.DataFrame(rows)
