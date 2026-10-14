@@ -62,6 +62,7 @@ NAV_ITEMS = [
     ("esko",         "⏱️  Esko Lead Time",           "esko"),
     ("forecast",     "📈  Demand Forecast",          "forecast"),
     ("quote2close",  "🎯  Quote to Close",           "quote2close"),
+    ("cop",          "💰  COP Strategy",             "cop"),
     ("admin",        "⚙️  User Management",          "admin"),
 ]
 
@@ -129,6 +130,8 @@ def route():
         from pages.demand_forecast import show; show()
     elif page == "quote2close":
         from pages.quote_to_close import show; show()
+    elif page == "cop":
+        from pages.cop_strategy import show; show()
     elif page == "admin":
         from pages.admin        import show; show()
 
