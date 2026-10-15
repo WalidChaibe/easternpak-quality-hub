@@ -25,7 +25,8 @@ def customer_columns(cy: int, py: int, years: list) -> dict:
         cols[f"copt_{y}"] = f"COP $/t {y}"
     cols.update({"dcopt": "COP $/t Δ", "dcop": "ΔCOP (SAR k)", "capture": "Price change kept as COP %", "reading": "Price → COP reading",
                  "vol_eff": "Volume effect", "price_eff": "Price effect", "cost_eff": "Cost effect",
-                 "vol_move": "Volume move", "copt_move": "COP/t move",
+                 "vol_move": "Volume move", "price_move": "Price/t move", "cost_move": "Cost/t move",
+                 "copt_move": "COP/t move",
                  "margin_tier": "Margin tier", "key_account": "Key account", "key_reason": "Key account because",
                  "worth": "Worth fighting for", "trend": "Multi-year COP trend",
                  "recent_copt_cy": f"COP $/t last months {cy}", "recent_copt_py": f"COP $/t same months {py}",

@@ -241,13 +241,13 @@ def show():
                 st.rerun()
             st.caption("Edits apply to this session and to the Excel download.")
         st.subheader("Customers by strategy")
-        pick = st.selectbox("Strategy", [v[0] for v in L.STRATEGIES.values()])
-        dd = view[view["strategy"] == pick]
-        cols = ["customer", "status", "margin_tier", "key_reason", "grow_tag", f"mt_{py}", f"mt_{cy}", "vol_pct",
-                f"copt_{py}", f"copt_{cy}", f"cop_{py}", f"cop_{cy}", "dcop", "vol_eff", "price_eff", "cost_eff",
-                "reading", "momentum"]
-        st.dataframe(dd[cols].rename(columns=cols_map), hide_index=True, use_container_width=True,
-                     column_config=_num_cfg(cols_map, cols))
+        pick = st.selectbox("Strategy", ["All strategies"] + [v[0] for v in L.STRATEGIES.values()])
+        dd = view if pick == "All strategies" else view[view["strategy"] == pick]
+        cols = ["customer", "strategy", "status", "margin_tier", "key_reason", "grow_tag", f"mt_{py}", f"mt_{cy}",
+                "vol_pct", f"copt_{py}", f"copt_{cy}", f"cop_{py}", f"cop_{cy}", "dcop", "vol_eff", "price_eff",
+                "cost_eff", "reading", "momentum"]
+        shown = _type_filter(dd[cols].rename(columns=cols_map), "f_strat")
+        st.dataframe(shown, hide_index=True, use_container_width=True, column_config=_num_cfg(cols_map, cols))
 
     # ════════ Price → COP ════════
     with tabs[2]:
@@ -290,11 +290,25 @@ def show():
                                            "cost": "of which cost", "meaning": "Meaning"})
         st.dataframe(rd, hide_index=True, use_container_width=True, column_config={
             c_: st.column_config.NumberColumn(c_, format="%,.0f") for c_ in rd.columns if c_ not in ("Reading", "Meaning")})
-        st.subheader("Price down, COP fell")
-        dm = view[view["reading"] == "Price down, COP fell"]
-        cols = ["customer", "strategy", f"mt_{cy}", "dprice", "dcopt", f"cop_{py}", f"cop_{cy}", "dcop"]
-        st.dataframe(dm[cols].sort_values("dcop").rename(columns=cols_map), hide_index=True, use_container_width=True,
-                     column_config=_num_cfg(cols_map, cols))
+        st.subheader("Customers by reading")
+        cont_view = view[view["status"] == "Continuing"]
+        c1, c2, c3 = st.columns([2, 1, 1])
+        rpick = c1.selectbox("Reading", ["All readings"] + list(L.READINGS))
+        cost_pick = c2.selectbox("Cost per ton", ["All", "Up", "Flat", "Down"],
+                                 help=f"Up / Down = moved at least ${s.copt_up:,.0f}/t")
+        copt_pick = c3.selectbox("COP per ton", ["All", "Up", "Flat", "Down"],
+                                 help=f"Up / Down = moved at least ${s.copt_up:,.0f}/t")
+        dm = cont_view if rpick == "All readings" else cont_view[cont_view["reading"] == rpick]
+        if cost_pick != "All":
+            dm = dm[dm["cost_move"] == cost_pick]
+        if copt_pick != "All":
+            dm = dm[dm["copt_move"] == copt_pick]
+        st.caption("Example: Cost per ton = Up and COP per ton = Up shows customers where the price increase was "
+                   "bigger than the cost increase.")
+        cols = ["customer", "reading", "strategy", f"mt_{cy}", "price_move", "dprice", "cost_move", "dcost",
+                "copt_move", "dcopt", f"cop_{py}", f"cop_{cy}", "dcop"]
+        shown = _type_filter(dm[cols].sort_values("dcop").rename(columns=cols_map), "f_read")
+        st.dataframe(shown, hide_index=True, use_container_width=True, column_config=_num_cfg(cols_map, cols))
 
     # ════════ Trends ════════
     with tabs[3]:
@@ -302,7 +316,8 @@ def show():
         tr = view[~view["trend"].str.startswith("Not active")].copy()
         tr["COP by year"] = tr[[f"cop_{y}" for y in years]].values.tolist()
         cols = ["customer", "trend", "COP by year"] + [f"cop_{y}" for y in years] + ["strategy"]
-        st.dataframe(tr[cols].rename(columns=trend_map), hide_index=True, use_container_width=True,
+        st.dataframe(_type_filter(tr[cols].rename(columns=trend_map), "f_trend"), hide_index=True,
+                     use_container_width=True,
                      column_config={**_num_cfg(cols_map, cols),
                                     "COP by year": st.column_config.LineChartColumn("COP by year")})
         st.caption(f"Customers with ≥ {s.min_mt:,.1f} MT in every uploaded year. Label = direction of COP over the last "
@@ -310,7 +325,8 @@ def show():
         st.subheader(f"Momentum: last {s.recent_months} months of {cy} vs the same months of {py}")
         mo = view[view["momentum"] != ""]
         cols = ["customer", "momentum", "recent_copt_py", "recent_copt_cy", "strategy"]
-        st.dataframe(mo[cols].rename(columns=trend_map), hide_index=True, use_container_width=True,
+        st.dataframe(_type_filter(mo[cols].rename(columns=trend_map), "f_mom"), hide_index=True,
+                     use_container_width=True,
                      column_config=_num_cfg(cols_map, cols))
         st.caption(f"The strategy column is the same as on the Strategies tab: it compares {cy} with {py} only, so it "
                    "can differ from the multi-year trend.")
@@ -345,7 +361,8 @@ Each row's own calculation is in the column **How it's calculated**.
         fl = L.focus_list(view, cy, py, s.fx)
         notes = st.session_state.setdefault("cop_focus_notes", {})
         cols = ["customer", "strategy", "at_stake", "stake_how", f"cop_{py}", f"cop_{cy}", "dcop", "momentum"]
-        fe = fl[cols].rename(columns={**cols_map, "stake_how": "How it's calculated"}).copy()
+        fe = _type_filter(fl[cols].rename(columns={**cols_map, "stake_how": "How it's calculated"}), "f_focus").copy()
+        fl = fl[fl["customer"].isin(fe["Customer"])]
         for c_ in FOCUS_EDIT_COLS:
             fe[c_] = [notes.get(n, {}).get(c_, "") for n in fl["customer"]]
         edited = st.data_editor(fe, hide_index=True, use_container_width=True,
@@ -392,7 +409,7 @@ their {py} level{f' {s.cost_adjust:+.0%}' if s.cost_adjust else ''} (slider in t
         rmap = {**cols_map, "cost_scenario_t": f"Cost $/t in what-if ({py} {s.cost_adjust:+.0%})",
                 f"cop_{cy}": f"COP {cy} actual (SAR k)", "cop_scenario": f"COP {cy} if cost back to {py} level",
                 "at_risk": "COP that depends on lower cost"}
-        st.dataframe(rv[cols].rename(columns=rmap), hide_index=True, use_container_width=True,
+        st.dataframe(_type_filter(rv[cols].rename(columns=rmap), "f_risk"), hide_index=True, use_container_width=True,
                      column_config=_num_cfg(rmap, cols))
 
     # ════════ Data check ════════
@@ -453,6 +470,23 @@ their {py} level{f' {s.cost_adjust:+.0%}' if s.cost_adjust else ''} (slider in t
     st.download_button("⬇️ Download all tables (.xlsx)", X.build_workbook(sheets),
                        file_name=f"cop_strategy_{cy}_vs_{py}_{period_lbl.replace('–', '-')}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def _type_filter(df: pd.DataFrame, key: str) -> pd.DataFrame:
+    """'Type to filter' above a table: pick a column (or any column) and type part of a value."""
+    c1, c2 = st.columns([1, 2])
+    col = c1.selectbox("Filter column", ["Any column"] + list(df.columns), key=f"{key}_col",
+                       label_visibility="collapsed")
+    txt = c2.text_input("Filter text", key=f"{key}_txt", placeholder="Type to filter rows…",
+                        label_visibility="collapsed")
+    if not txt:
+        return df
+    as_text = df.astype(str)
+    hit = (as_text.apply(lambda c: c.str.contains(txt, case=False, regex=False)).any(axis=1)
+           if col == "Any column" else as_text[col].str.contains(txt, case=False, regex=False))
+    out = df[hit]
+    st.caption(f"{len(out):,} of {len(df):,} rows match '{txt}'" + ("" if col == "Any column" else f" in {col}"))
+    return out
 
 
 def _num_cfg(cols_map: dict, cols: list) -> dict:

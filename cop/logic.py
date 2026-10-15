@@ -192,6 +192,11 @@ def customer_table(data: dict, cy: int, py: int, s: Settings) -> pd.DataFrame:
                                             np.where(t["vol_pct"] <= s.vol_down, "Declining", "Stable")), "")
     t["copt_move"] = np.where(cont, np.where(t["dcopt"] >= s.copt_up, "Up",
                                              np.where(t["dcopt"] <= s.copt_down, "Down", "Flat")), "")
+    # Same thresholds for price (min price change) and cost per ton (COP/t thresholds), for filtering
+    t["price_move"] = np.where(cont, np.where(t["dprice"] >= s.min_price_change, "Up",
+                                              np.where(t["dprice"] <= -s.min_price_change, "Down", "Flat")), "")
+    t["cost_move"] = np.where(cont, np.where(t["dcost"] >= s.copt_up, "Up",
+                                             np.where(t["dcost"] <= s.copt_down, "Down", "Flat")), "")
 
     # Worth fighting for = High or Mid margin tier, OR a key account
     t["tier_cy"] = t[f"copt_{cy}"].map(lambda x: margin_tier(x, s))
