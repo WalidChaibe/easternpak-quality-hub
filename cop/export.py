@@ -10,7 +10,7 @@ WHITE_BOLD = Font(bold=True, color="FFFFFF")
 
 def customer_columns(cy: int, py: int, years: list) -> dict:
     """Internal column -> header, in display order."""
-    cols = {"customer": "Customer", "status": "Status", "strategy": "Strategy", "grow_tag": "Grow sub-tag",
+    cols = {"customer": "Customer", "status": "Status", "strategy": "Strategy", "grow_tag": "COP growth driver",
             "action": "What to do"}
     for y in years:
         cols[f"mt_{y}"] = f"MT {y}"

@@ -210,8 +210,13 @@ def customer_table(data: dict, cy: int, py: int, s: Settings) -> pd.DataFrame:
                         zip(t["status"], t["vol_move"], t["copt_move"], t[f"copt_{cy}"], t["worth_cy"], t["worth_py"])]
     t["strategy"] = t["strategy_no"].map(lambda k: STRATEGIES[k][0])
     t["action"] = t["strategy_no"].map(lambda k: s.actions.get(k, STRATEGIES[k][2]))
+    # COP growth driver (Grow customers only). Price bar > 0 <=> price per ton went up;
+    # cost bar > 0 <=> cost per ton went down - so the labels say exactly what happened.
+    up_p, down_c = t["price_eff"] > 0, t["cost_eff"] > 0
     t["grow_tag"] = np.where(t["strategy_no"] == 1,
-                             np.where(t["price_eff"] >= t["cost_eff"], "grew on price", "grew on cost"), "")
+                             np.select([up_p & down_c, up_p, down_c],
+                                       ["Price up, cost down", "Price up, cost up", "Price down, cost down"],
+                                       "Volume only"), "")
 
     t["trend"] = multi_year_trend(t, years, s.min_mt)
     t = t.join(momentum(data, cy, py, names, s))
