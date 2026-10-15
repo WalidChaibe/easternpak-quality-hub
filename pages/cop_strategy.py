@@ -21,6 +21,13 @@ def _read(content: bytes, name: str, sheet):
 
 
 @st.cache_data(show_spinner=False, max_entries=4)
+def _names(data: dict) -> list[str]:
+    """Customer names after merging spelling variants (for the 'Mark as key account' picker)."""
+    merged, _ = L.standardize_names(data)
+    return sorted(pd.unique(pd.concat([d["customer"] for d in merged.values()])), key=str.lower)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
 def _run(data: dict, settings: L.Settings):
     return L.run(data, settings)
 
@@ -98,7 +105,10 @@ def show():
                             help="Default: last complete month of CY (the last month in the file is often partial).")
     with sb.expander("Thresholds", expanded=False):
         fx = st.number_input("FX rate (SAR per USD)", value=3.75, step=0.01, format="%.2f")
-        min_mt = st.number_input("Minimum MT to classify a customer", value=10.0, step=1.0)
+        min_mt_month = st.number_input("Minimum MT per month to classify a customer", value=10 / 9, step=0.1,
+                                       format="%.3f", help="Scales with the months compared: 1.111 x 9 months = 10 MT.")
+        min_mt = round(min_mt_month * int(month_to), 6)          # 10/9 x 9 = exactly 10.0
+        st.caption(f"= **{min_mt:,.1f} MT** for Jan–{load.MONTHS[int(month_to) - 1]}")
         recent = st.number_input("Recent window for momentum (months)", min_value=1, max_value=12, value=3)
         vol_up = st.number_input("Volume Growing at ≥ (%)", value=5.0, step=1.0) / 100
         vol_down = st.number_input("Volume Declining at ≤ (%)", value=-5.0, step=1.0) / 100
@@ -107,16 +117,28 @@ def show():
         min_price = st.number_input("Min price change to measure capture ($/t)", value=20.0, step=1.0)
         cap_real = st.number_input("Real margin gain at capture ≥ (%)", value=75.0, step=5.0) / 100
         cap_part = st.number_input("Partly cost recovery at capture ≥ (%)", value=25.0, step=5.0) / 100
-        worth_copt = st.number_input("Worth fighting for: COP/t ≥ ($/t)", value=100.0, step=10.0)
-        worth_top = st.number_input("… or inside the top X% of PY COP", value=80.0, step=5.0) / 100
+    sb.header("Worth fighting for")
+    sb.caption("Worth fighting for = High or Mid margin, **or** a key account.")
+    tier_mid = sb.number_input("Mid margin from ($/t)", value=65.0, step=5.0,
+                               help="Below this: Low margin. Below $0/t: Loss-making.")
+    tier_high = sb.number_input("High margin from ($/t)", value=230.0, step=5.0)
+    if tier_high <= tier_mid:
+        sb.error("'High margin from' must be above 'Mid margin from'.")
+        st.stop()
+    key_share = sb.slider("Key accounts = customers making the top … of PY COP", 0, 100, 80, 5, format="%d%%",
+                          help="0% = no key accounts (only customers marked by hand below).") / 100
+    manual_keys = sb.multiselect("Also mark as key account", _names(data), placeholder="Type a customer name",
+                                 help="For strategic customers that are not in the top group. Kept for this session "
+                                      "only - nothing is saved.")
     cost_adj = sb.slider("Cost risk: PY cost/t ±", -20, 20, 0, 1, format="%d%%") / 100
 
     if "cop_actions" not in st.session_state:
         st.session_state["cop_actions"] = {k: v[2] for k, v in L.STRATEGIES.items()}
     s = L.Settings(month_to=int(month_to), fx=fx, min_mt=min_mt, recent_months=int(recent), vol_up=vol_up,
                    vol_down=vol_down, copt_up=copt_up, copt_down=copt_down, min_price_change=min_price,
-                   capture_real=cap_real, capture_partly=cap_part, worth_copt=worth_copt, worth_top_share=worth_top,
-                   cost_adjust=cost_adj, actions=dict(st.session_state["cop_actions"]))
+                   capture_real=cap_real, capture_partly=cap_part, tier_mid=tier_mid, tier_high=tier_high,
+                   key_share=key_share, manual_keys=tuple(manual_keys), cost_adjust=cost_adj,
+                   actions=dict(st.session_state["cop_actions"]))
     missing = [y for y in years if not (data[y]["m"] <= s.month_to).any()]
     if missing:
         st.error(f"No data in Jan–{load.MONTHS[s.month_to - 1]} for {missing}.")
@@ -125,6 +147,7 @@ def show():
     with st.spinner("Calculating…"):
         R = _run(data, s)
     t = R["table"]
+    data = R["data"]                      # names merged
 
     # ── Filters (customer lists only; totals always cover everyone) ──
     sb.header("Filters")
@@ -170,9 +193,9 @@ def show():
 
         b = R["bridge"]
         steps = [("COP " + str(py), b["cop_py"], "absolute"), ("Volume", b["volume"], "relative"),
-                 ("Price", b["price"], "relative"), ("Cost / mix", b["cost_mix"], "relative"),
-                 ("New / regained", b["new"], "relative"), ("Lost / near-lost", b["lost"], "relative"),
-                 ("Low data", b["low_data"], "relative"), ("COP " + str(cy), b["cop_cy"], "total")]
+                 ("Price", b["price"], "relative"), ("Cost", b["cost"], "relative"),
+                 ("New customers", b["new"], "relative"), ("Lost customers", b["lost"], "relative"),
+                 ("Small customers", b["small"], "relative"), ("COP " + str(cy), b["cop_cy"], "total")]
         fig = go.Figure(go.Waterfall(x=[s_[0] for s_ in steps], y=[s_[1] for s_ in steps],
                                      measure=[s_[2] for s_ in steps], text=[f"{s_[1]:+,.0f}" if s_[2] == "relative"
                                                                            else f"{s_[1]:,.0f}" for s_ in steps],
@@ -183,8 +206,18 @@ def show():
                           height=430, plot_bgcolor="white", margin=dict(l=10, r=10, t=50, b=10), showlegend=False)
         fig.update_yaxes(gridcolor="#EEEEEE")
         st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"Check: bridge total − actual {cy} COP = **{b['check']:,.6f}** (must be 0). Volume / price / "
-                   "cost-mix are for continuing customers; new, lost and low-data customers each carry their whole ΔCOP.")
+        st.markdown(f"""
+| Bar | What it means | SAR k |
+|---|---|---|
+| **Volume** | Customers buying more or fewer tons, valued at last year's COP per ton | {b['volume']:+,.0f} |
+| **Price** | Change in price per ton × tons sold this year | {b['price']:+,.0f} |
+| **Cost** | Change in production + freight cost per ton × tons sold this year (lower cost = positive) | {b['cost']:+,.0f} |
+| **New customers** | All COP from customers under {s.min_mt:,.1f} MT last year and above it this year | {b['new']:+,.0f} |
+| **Lost customers** | All COP lost from customers above {s.min_mt:,.1f} MT last year and under it this year | {b['lost']:+,.0f} |
+| **Small customers** | Customers under {s.min_mt:,.1f} MT in **both** years - too small to split, shown in one bar | {b['small']:+,.0f} |
+""")
+        st.caption(f"Volume, price and cost are calculated for customers above {s.min_mt:,.1f} MT in both years. "
+                   f"Check: all bars add up to the actual {cy} COP (difference = {b['check']:,.6f}).")
 
     # ════════ Strategies ════════
     with tabs[1]:
@@ -192,7 +225,7 @@ def show():
                                                  "customers": "Customers", f"mt_{cy}": f"MT {cy}",
                                                  f"cop_{py}": f"COP {py}", f"cop_{cy}": f"COP {cy}", "dcop": "ΔCOP",
                                                  "volume": "of which volume", "price": "of which price",
-                                                 "cost_mix": "of which cost/mix", "action": "What to do"})
+                                                 "cost": "of which cost", "action": "What to do"})
         st.dataframe(st_tbl, hide_index=True, use_container_width=True, column_config={
             c: st.column_config.NumberColumn(c, format="%,.0f") for c in st_tbl.columns
             if c not in ("#", "Strategy", "Who falls here", "What to do", "Customers")})
@@ -208,8 +241,9 @@ def show():
         st.subheader("Customers by strategy")
         pick = st.selectbox("Strategy", [v[0] for v in L.STRATEGIES.values()])
         dd = view[view["strategy"] == pick]
-        cols = ["customer", "status", "grow_tag", f"mt_{py}", f"mt_{cy}", "vol_pct", f"copt_{py}", f"copt_{cy}",
-                f"cop_{py}", f"cop_{cy}", "dcop", "vol_eff", "price_eff", "cost_eff", "reading", "momentum"]
+        cols = ["customer", "status", "margin_tier", "key_reason", "grow_tag", f"mt_{py}", f"mt_{cy}", "vol_pct",
+                f"copt_{py}", f"copt_{cy}", f"cop_{py}", f"cop_{cy}", "dcop", "vol_eff", "price_eff", "cost_eff",
+                "reading", "momentum"]
         st.dataframe(dd[cols].rename(columns=cols_map), hide_index=True, use_container_width=True,
                      column_config=_num_cfg(cols_map, cols))
 
@@ -237,7 +271,7 @@ def show():
                    "of price became $1 of COP per ton.")
         rd = R["readings"].rename(columns={"reading": "Reading", "customers": "Customers", "avg_dprice": "Avg price Δ $/t",
                                            "avg_dcopt": "Avg COP/t Δ $/t", "dcop": "ΔCOP", "price": "of which price",
-                                           "cost_mix": "of which cost/mix", "meaning": "Meaning"})
+                                           "cost": "of which cost", "meaning": "Meaning"})
         st.dataframe(rd, hide_index=True, use_container_width=True, column_config={
             c_: st.column_config.NumberColumn(c_, format="%,.0f") for c_ in rd.columns if c_ not in ("Reading", "Meaning")})
         st.subheader("Discounts that cut margin")
@@ -255,7 +289,7 @@ def show():
         st.dataframe(tr[cols].rename(columns=cols_map), hide_index=True, use_container_width=True,
                      column_config={**_num_cfg(cols_map, cols),
                                     "COP by year": st.column_config.LineChartColumn("COP by year")})
-        st.caption(f"Customers with ≥ {s.min_mt:g} MT in every uploaded year. Label = direction of COP over the last "
+        st.caption(f"Customers with ≥ {s.min_mt:,.1f} MT in every uploaded year. Label = direction of COP over the last "
                    "two changes (Growing ↑↑ · Recovering ↓↑ · Falling back ↑↓ · Declining ↓↓).")
         st.subheader(f"Momentum: last {s.recent_months} months of {cy} vs the same months of {py}")
         mo = view[view["momentum"] != ""]
@@ -317,17 +351,33 @@ def show():
     # ════════ Data check ════════
     with tabs[6]:
         st.dataframe(chk, hide_index=True, use_container_width=True)
+        kt_ = t[t["key_account"]]
         st.markdown(f"""
 - **Customers analysed:** everyone in the {py} or {cy} file (any month), as in the workbook - **{len(t):,}**.
-- **Status:** MT under {s.min_mt:g} in both years → Low data · {py} only → New / regained · {cy} only → Lost / near-lost
-  · otherwise Continuing.
-- **Worth fighting for:** COP/t ≥ ${s.worth_copt:,.0f}/t ({cy} for continuing, {py} for lost customers) **or** inside
-  the top {s.worth_top_share:.0%} of {py} COP (cumulative) - replaces the workbook's margin tier.
+- **Small customer threshold:** {min_mt_month:.3f} MT per month × {s.month_to} months = **{s.min_mt:,.1f} MT**.
+- **Status:** under {s.min_mt:,.1f} MT in both years → Small customer · under it in {py} only → New / regained · under
+  it in {cy} only → Lost / near-lost · otherwise Continuing.
+- **Margin tier** (COP per ton; {cy} for continuing customers, {py} for lost ones): High ≥ ${s.tier_high:,.0f} ·
+  Mid ${s.tier_mid:,.0f}–{s.tier_high:,.0f} · Low $0–{s.tier_mid:,.0f} · Loss-making < $0.
+- **Key accounts** ({len(kt_):,}): the customers that together make {s.key_share:.0%} of all positive {py} COP
+  ({int((kt_['key_reason'] != 'Marked by PM').sum())}), plus any marked by hand for this session
+  ({int((kt_['key_reason'] == 'Marked by PM').sum())}).
+  A key account is worth fighting for even at a low margin.
+- **Worth fighting for** = High or Mid margin, **or** a key account.
 - **Momentum** compares the last {s.recent_months} months of {cy} with the same months of {py}.
 - **Year KPIs** use every customer in that year's file. (The workbook's 2024 MT and COP only counted customers also
   present in 2025/2026, while its sales counted all - so its 2024 price/t was inconsistent.)
 - Rows without a customer name are kept as **'{load.BLANK_CUSTOMER}'**.
+- **Duplicate names are always merged** (list below).
 """)
+        st.subheader("Customer names treated as one customer")
+        if R["merges"].empty:
+            st.caption("No name variants found.")
+        else:
+            st.caption("Same name after ignoring case, spaces and punctuation, or the same English name with an added "
+                       "Arabic name. Shown under the spelling used most in the latest year.")
+            st.dataframe(R["merges"].rename(columns={"shown_as": "Shown as", "names_merged": "Names merged"}),
+                         hide_index=True, use_container_width=True)
 
     # ── Export ──
     cust = t[list(cols_map)].rename(columns=cols_map)
@@ -340,16 +390,16 @@ def show():
         "KPIs": R["kpis"].rename(columns={"year": "Year", "mt": "MT", "sales": "Gross sales (SAR k)", "cop": "COP (SAR k)",
                                           "price_t": "Price $/t", "cost_t": "Cost $/t", "cop_t": "COP $/t",
                                           "active_customers": "Active customers"}),
-        "Bridge": pd.DataFrame({"Step": [f"COP {py}", "Volume effect", "Price effect", "Cost / mix effect",
-                                         "New / regained", "Lost / near-lost", "Low data", f"COP {cy}", "Check (must be 0)"],
-                                "SAR k": [b["cop_py"], b["volume"], b["price"], b["cost_mix"], b["new"], b["lost"],
-                                          b["low_data"], b["cop_cy"], b["check"]]}),
+        "Bridge": pd.DataFrame({"Step": [f"COP {py}", "Volume", "Price", "Cost", "New customers", "Lost customers",
+                                         "Small customers", f"COP {cy}", "Check (must be 0)"],
+                                "SAR k": [b["cop_py"], b["volume"], b["price"], b["cost"], b["new"], b["lost"],
+                                          b["small"], b["cop_cy"], b["check"]]}),
         "Strategies": st_tbl, "Customers": cust, "Price-COP readings": rd, "Focus list": focus,
+        "Merged names": R["merges"].rename(columns={"shown_as": "Shown as", "names_merged": "Names merged"}),
         "Cost risk": R["risk"].rename(columns=rmap)[[rmap[c_] for c_ in ["customer", "strategy", f"mt_{cy}", f"cost_{py}",
                                                                         f"cost_{cy}", "cost_scenario_t", f"cop_{cy}",
                                                                         "cop_scenario", "at_risk", "scenario_basis"]]],
-        "Settings": pd.DataFrame({"Setting": list(vars(s).keys())[:-1],
-                                  "Value": [str(v) for k_, v in vars(s).items() if k_ != "actions"]}),
+        "Settings": pd.DataFrame([{"Setting": k_, "Value": str(v)} for k_, v in vars(s).items() if k_ != "actions"]),
     }
     st.download_button("⬇️ Download all tables (.xlsx)", X.build_workbook(sheets),
                        file_name=f"cop_strategy_{cy}_vs_{py}_{period_lbl.replace('–', '-')}.xlsx",

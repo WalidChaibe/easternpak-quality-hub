@@ -2,14 +2,18 @@
 Customer COP strategy - all calculations. Pure functions - no Streamlit calls.
 
 Mirrors the 'Customer Strategy' and 'Summary' sheets of the PM's COP workbook (checked customer by customer:
-2025 vs 2026, Jan-Sep), with three agreed changes from the brief:
-  1. 'Worth fighting for' (COP/t >= $100 or inside the top 80% of PY COP) replaces the old margin tier.
-  2. Momentum compares the last N months of CY with the SAME months of PY (no seasonality mix-up).
-  3. Focus list and cost-risk views added.
+2025 vs 2026, Jan-Sep, with name merging switched off), with these agreed changes:
+  1. Margin tiers set by the manager: High >= $230/t, Mid $65-230/t, Low $0-65/t, Loss-making < $0/t.
+     Worth fighting for = High or Mid margin, OR a key account (one of the customers that together make
+     80% of PY COP) - so a big customer is worth fighting for even at a low margin.
+  2. Momentum compares the last N months of CY with the SAME months of PY (seasonality-safe).
+  3. Customer names that differ only in case / spaces / punctuation, or by an added Arabic name, are one customer.
+  4. Plain labels: the bridge is Volume / Price / Cost / New / Lost / Small customers.
 
 Units: MT, SAR k for sales/COP totals, $/t for per-ton values ($/t = SAR k x 1000 / MT / FX).
 Customer universe: every customer in the PY or CY file (any month), as in the workbook.
 """
+import re
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
@@ -23,17 +27,17 @@ STRATEGIES = {
         "Keep the price – it is sticking. Plan the next increase."),
     3: ("Raise price", "Volume not falling, but COP per ton falling (or flat with stable volume), or loss-making",
         "Raise price at next renewal. Show cost evidence. The customer is not leaving."),
-    4: ("Defend", "Volume falling, worth fighting for",
+    4: ("Defend", "Volume falling, worth fighting for (High/Mid margin or key account)",
         "Meet them quickly. Find the reason. Fix service or design before touching price."),
-    5: ("Fix or exit", "Volume falling, not worth fighting for",
+    5: ("Fix or exit", "Volume falling, Low or loss-making margin and not a key account",
         "Don't discount to keep them. Reprice to cover cost, or let the volume go."),
     6: ("Onboard", "New or regained customer",
         "Check the price covers cost and freight. Agree terms early."),
-    7: ("Win back", "Lost customer that was worth fighting for",
+    7: ("Win back", "Lost customer that was worth fighting for (judged on PY)",
         "Call them. Find out why they left. Try to win them back."),
-    8: ("Let go", "Lost customer that was not worth fighting for",
+    8: ("Let go", "Lost customer with a Low or loss-making PY margin, not a key account",
         "Don't chase. Put the effort elsewhere."),
-    9: ("Not classified", "Under min MT in both years", "Too small. Review once a year."),
+    9: ("Not classified", "Small customer: under the minimum MT in both years", "Too small. Review once a year."),
 }
 
 READINGS = {
@@ -43,18 +47,19 @@ READINGS = {
     "Cost ran ahead of price": "Price went up but cost rose more – COP per ton fell; needs another increase",
     "Discount covered by cost savings": "Price went down but lower cost kept COP per ton – exposed if costs rise",
     "Discount cut margin": "Price went down and COP per ton fell",
-    "Margin up without price": "Price flat; COP per ton rose from lower cost or better mix",
+    "Margin up without price": "Price flat; COP per ton rose because cost per ton fell",
     "Margin squeezed – no price increase": "Price flat; cost rose so COP per ton fell",
     "No change": "Price and COP per ton both roughly flat",
 }
-STATUSES = ["Continuing", "New / regained", "Lost / near-lost", "Low data"]
+STATUSES = ["Continuing", "New / regained", "Lost / near-lost", "Small customer"]
+TIERS = ["High", "Mid", "Low", "Loss-making"]
 
 
 @dataclass
 class Settings:                       # defaults = the workbook's Assumptions sheet
     month_to: int = 9                 # compare months 1..M
     fx: float = 3.75                  # SAR per USD
-    min_mt: float = 10.0              # minimum MT in the period to classify a customer
+    min_mt: float = 10.0              # minimum MT in the period (the page sets it as MT per month x months compared)
     recent_months: int = 3            # momentum window
     vol_up: float = 0.05              # volume Growing if change >= +5%
     vol_down: float = -0.05           # volume Declining if change <= -5%
@@ -63,8 +68,11 @@ class Settings:                       # defaults = the workbook's Assumptions sh
     min_price_change: float = 20.0    # capture only measured if |price change| >= $20/t
     capture_real: float = 0.75
     capture_partly: float = 0.25
-    worth_copt: float = 100.0         # worth fighting for: COP/t >= $100 ...
-    worth_top_share: float = 0.80     # ... or inside the top 80% of PY COP (cumulative)
+    tier_mid: float = 65.0            # margin tier: Mid from $65/t ...
+    tier_high: float = 230.0          # ... High from $230/t (Low below $65/t, Loss-making below $0/t)
+    key_share: float = 0.80           # key accounts: the customers that together make 80% of PY COP
+    merge_names: bool = True          # always on in the app; False only in tests, to reproduce the workbook exactly
+    manual_keys: tuple = ()           # customers the PM marks as key accounts by hand
     cost_adjust: float = 0.0          # cost-risk scenario: PY cost/t x (1 + this)
     actions: dict = field(default_factory=lambda: {k: v[2] for k, v in STRATEGIES.items()})
 
@@ -74,6 +82,46 @@ def per_ton(sar_k, mt, fx):
     mt = np.asarray(mt, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
         return np.where(mt > 0, np.asarray(sar_k, dtype=float) * 1000 / np.where(mt > 0, mt, 1) / fx, np.nan)
+
+
+_ARABIC = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+")
+_NON_WORD = re.compile(r"[\W_]+", re.UNICODE)
+
+
+def name_key(name: str) -> str:
+    """
+    Same customer if the names match after ignoring case, spaces and punctuation - and, for names written
+    'English + Arabic', after dropping the Arabic part ('شركة الراشد للاغذية Rashed Bakery' = 'Rashed Bakery').
+    Names written only in Arabic keep their Arabic letters.
+    """
+    latin = _NON_WORD.sub("", _ARABIC.sub("", str(name))).upper()
+    return latin if latin else _NON_WORD.sub("", str(name)).upper()
+
+
+def standardize_names(data: dict) -> tuple[dict, pd.DataFrame]:
+    """
+    Merge name variants into one customer, shown under the spelling with the most MT in the latest year it appears.
+    Returns the renamed data and the list of merges (for review). Nothing is dropped.
+    """
+    rows = []
+    for y, d in data.items():
+        g = d.groupby("customer")["mt"].sum()
+        rows += [{"customer": n, "year": y, "mt": v} for n, v in g.items()]
+    seen = pd.DataFrame(rows)
+    seen["key"] = seen["customer"].map(name_key)
+    seen = seen.sort_values(["key", "year", "mt"], ascending=[True, False, False])
+    display = seen.groupby("key")["customer"].first()
+    mapping = {n: display[k] for n, k in zip(seen["customer"], seen["key"])}
+    variants = seen.groupby("key")["customer"].agg(lambda x: sorted(set(x)))
+    merged = variants[variants.map(len) > 1]
+    merges = pd.DataFrame({"shown_as": [display[k] for k in merged.index],
+                           "names_merged": [" | ".join(v) for v in merged]})
+    out = {}
+    for y, d in data.items():
+        d = d.copy()
+        d["customer"] = d["customer"].map(mapping)
+        out[y] = d
+    return out, merges.sort_values("shown_as").reset_index(drop=True)
 
 
 def period(df: pd.DataFrame, lo: int, hi: int) -> pd.DataFrame:
@@ -116,7 +164,7 @@ def customer_table(data: dict, cy: int, py: int, s: Settings) -> pd.DataFrame:
 
     mp, mc = t[f"mt_{py}"], t[f"mt_{cy}"]
     t["status"] = np.select([(mp < s.min_mt) & (mc < s.min_mt), mp < s.min_mt, mc < s.min_mt],
-                            ["Low data", "New / regained", "Lost / near-lost"], "Continuing")
+                            ["Small customer", "New / regained", "Lost / near-lost"], "Continuing")
     cont = t["status"] == "Continuing"
 
     t["vol_pct"] = np.where((mp > 0) & (mc > 0), mc / mp.where(mp > 0) - 1, np.nan)
@@ -145,10 +193,18 @@ def customer_table(data: dict, cy: int, py: int, s: Settings) -> pd.DataFrame:
     t["copt_move"] = np.where(cont, np.where(t["dcopt"] >= s.copt_up, "Up",
                                              np.where(t["dcopt"] <= s.copt_down, "Down", "Flat")), "")
 
-    # Worth fighting for
-    t["top_py"] = top_share(t[f"cop_{py}"], s.worth_top_share)
-    t["worth_cy"] = (t[f"copt_{cy}"] >= s.worth_copt) | t["top_py"]
-    t["worth_py"] = (t[f"copt_{py}"] >= s.worth_copt) | t["top_py"]
+    # Worth fighting for = High or Mid margin tier, OR a key account
+    t["tier_cy"] = t[f"copt_{cy}"].map(lambda x: margin_tier(x, s))
+    t["tier_py"] = t[f"copt_{py}"].map(lambda x: margin_tier(x, s))
+    t["margin_tier"] = np.where(t["status"] == "Lost / near-lost", t["tier_py"], t["tier_cy"])
+    top = top_share(t[f"cop_{py}"], s.key_share)
+    manual = t.index.isin(list(s.manual_keys))
+    t["key_account"] = top | manual
+    t["key_reason"] = np.where(top, f"Top {s.key_share:.0%} of {py} COP", np.where(manual, "Marked by PM", ""))
+    t["worth_cy"] = t["tier_cy"].isin(["High", "Mid"]) | t["key_account"]
+    t["worth_py"] = t["tier_py"].isin(["High", "Mid"]) | t["key_account"]
+    t["worth"] = np.where(t["status"] == "Lost / near-lost", t["worth_py"],
+                          np.where(t["status"] == "Continuing", t["worth_cy"], False))
 
     t["strategy_no"] = [strategy(st, v, c, x, wc, wp) for st, v, c, x, wc, wp in
                         zip(t["status"], t["vol_move"], t["copt_move"], t[f"copt_{cy}"], t["worth_cy"], t["worth_py"])]
@@ -182,6 +238,17 @@ def _reading(st, i, u, w, s: Settings) -> str:
     return "No change"
 
 
+def margin_tier(copt, s: Settings) -> str:
+    """High >= $230/t · Mid $65-230/t · Low $0-65/t · Loss-making < $0/t (thresholds editable)."""
+    if pd.isna(copt):
+        return ""
+    if copt < 0:
+        return "Loss-making"
+    if copt >= s.tier_high:
+        return "High"
+    return "Mid" if copt >= s.tier_mid else "Low"
+
+
 def top_share(cop_py: pd.Series, share: float) -> pd.Series:
     """True for customers inside the top `share` of PY COP: ranked by PY COP, cumulative share before them < share."""
     pos = cop_py.clip(lower=0)
@@ -196,7 +263,7 @@ def top_share(cop_py: pd.Series, share: float) -> pd.Series:
 
 def strategy(st, v, c, copt_cy, worth_cy, worth_py) -> int:
     """Exactly one strategy per customer - same precedence as the workbook's Strategy # formula."""
-    if st == "Low data":
+    if st == "Small customer":
         return 9
     if st == "New / regained":
         return 6
@@ -225,7 +292,7 @@ def strategy_excel_tier(t: pd.DataFrame, cy: int, py: int, high_pct: float = 0.6
 
     out = []
     for _, r in t.iterrows():
-        x = r[f"copt_{py}"] if r["status"] == "Lost / near-lost" else (np.nan if r["status"] == "Low data" else r[f"copt_{cy}"])
+        x = r[f"copt_{py}"] if r["status"] == "Lost / near-lost" else (np.nan if r["status"] == "Small customer" else r[f"copt_{cy}"])
         hm = tier(x) in ("High", "Mid")
         out.append(strategy(r["status"], r["vol_move"], r["copt_move"], r[f"copt_{cy}"], hm, hm))
     return pd.Series(out, index=t.index)
@@ -291,13 +358,13 @@ def finalize(t: pd.DataFrame) -> pd.DataFrame:
 def bridge(t: pd.DataFrame, cy: int, py: int) -> dict:
     b = {
         "cop_py": t[f"cop_{py}"].sum(),
-        "volume": t["vol_eff"].sum(), "price": t["price_eff"].sum(), "cost_mix": t["cost_eff"].sum(),
+        "volume": t["vol_eff"].sum(), "price": t["price_eff"].sum(), "cost": t["cost_eff"].sum(),
         "new": t.loc[t["status"] == "New / regained", "dcop"].sum(),
         "lost": t.loc[t["status"] == "Lost / near-lost", "dcop"].sum(),
-        "low_data": t.loc[t["status"] == "Low data", "dcop"].sum(),
+        "small": t.loc[t["status"] == "Small customer", "dcop"].sum(),
         "cop_cy": t[f"cop_{cy}"].sum(),
     }
-    b["check"] = b["cop_py"] + b["volume"] + b["price"] + b["cost_mix"] + b["new"] + b["lost"] + b["low_data"] - b["cop_cy"]
+    b["check"] = b["cop_py"] + b["volume"] + b["price"] + b["cost"] + b["new"] + b["lost"] + b["small"] - b["cop_cy"]
     return b
 
 
@@ -307,7 +374,7 @@ def strategy_summary(t: pd.DataFrame, cy: int, py: int, s: Settings) -> pd.DataF
         x = t[t["strategy_no"] == k]
         rows.append({"#": k, "strategy": name, "who": who, "customers": len(x), f"mt_{cy}": x[f"mt_{cy}"].sum(),
                      f"cop_{py}": x[f"cop_{py}"].sum(), f"cop_{cy}": x[f"cop_{cy}"].sum(), "dcop": x["dcop"].sum(),
-                     "volume": x["vol_eff"].sum(), "price": x["price_eff"].sum(), "cost_mix": x["cost_eff"].sum(),
+                     "volume": x["vol_eff"].sum(), "price": x["price_eff"].sum(), "cost": x["cost_eff"].sum(),
                      "action": s.actions.get(k, STRATEGIES[k][2])})
     out = pd.DataFrame(rows)
     tot = out.drop(columns=["#", "strategy", "who", "action"]).sum()
@@ -324,7 +391,7 @@ def reading_summary(t: pd.DataFrame) -> pd.DataFrame:
         rows.append({"reading": r, "customers": len(x),
                      "avg_dprice": x["dprice"].mean() if len(x) else 0.0,
                      "avg_dcopt": x["dcopt"].mean() if len(x) else 0.0,
-                     "dcop": x["dcop"].sum(), "price": x["price_eff"].sum(), "cost_mix": x["cost_eff"].sum(),
+                     "dcop": x["dcop"].sum(), "price": x["price_eff"].sum(), "cost": x["cost_eff"].sum(),
                      "meaning": meaning})
     return pd.DataFrame(rows)
 
@@ -361,7 +428,11 @@ def run(data: dict, s: Settings):
     """Everything the app needs, in one call (cache this)."""
     years = sorted(data)
     cy, py = years[-1], years[-2]
+    merges = pd.DataFrame(columns=["shown_as", "names_merged"])
+    if s.merge_names:
+        data, merges = standardize_names(data)
     t = finalize(customer_table(data, cy, py, s))
     return {"cy": cy, "py": py, "years": years, "table": t, "kpis": year_kpis(data, s),
             "bridge": bridge(t, cy, py), "strategies": strategy_summary(t, cy, py, s),
-            "readings": reading_summary(t), "focus": focus_list(t), "risk": cost_risk(t, cy, py, s)}
+            "readings": reading_summary(t), "focus": focus_list(t), "risk": cost_risk(t, cy, py, s),
+            "merges": merges, "data": data}
