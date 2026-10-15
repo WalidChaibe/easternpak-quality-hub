@@ -23,7 +23,7 @@ def customer_columns(cy: int, py: int, years: list) -> dict:
         cols[f"cop_{y}"] = f"COP {y} (SAR k)"
     for y in years:
         cols[f"copt_{y}"] = f"COP $/t {y}"
-    cols.update({"dcopt": "COP $/t Δ", "dcop": "ΔCOP (SAR k)", "capture": "Capture %", "reading": "Price → COP reading",
+    cols.update({"dcopt": "COP $/t Δ", "dcop": "ΔCOP (SAR k)", "capture": "Price change kept as COP %", "reading": "Price → COP reading",
                  "vol_eff": "Volume effect", "price_eff": "Price effect", "cost_eff": "Cost effect",
                  "vol_move": "Volume move", "copt_move": "COP/t move",
                  "margin_tier": "Margin tier", "key_account": "Key account", "key_reason": "Key account because",
@@ -47,7 +47,7 @@ def build_workbook(sheets: dict) -> bytes:
                 width = 45 if str(col) in ("Customer", "What to do", "Meaning", "Who falls here", "Reading") else 14
                 ws.column_dimensions[get_column_letter(j)].width = width
                 if pd.api.types.is_float_dtype(df[col]):
-                    fmt = "0.0%" if ("%" in str(col) or "Share" in str(col) or "Capture" in str(col)) else "#,##0.00"
+                    fmt = "0.0%" if ("%" in str(col) or "Share" in str(col)) else "#,##0.00"
                     for r in range(2, len(df) + 2):
                         ws.cell(row=r, column=j).number_format = fmt
     return buf.getvalue()

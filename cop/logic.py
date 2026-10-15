@@ -40,16 +40,16 @@ STRATEGIES = {
     9: ("Not classified", "Small customer: under the minimum MT in both years", "Too small. Review once a year."),
 }
 
-READINGS = {
-    "Real margin gain": "Price went up and most of it stayed as COP",
-    "Partly cost recovery": "Price went up; part covered higher cost/freight, part became COP",
-    "Cost recovery only": "Price went up but COP per ton barely moved – the increase only covered cost",
-    "Cost ran ahead of price": "Price went up but cost rose more – COP per ton fell; needs another increase",
-    "Discount covered by cost savings": "Price went down but lower cost kept COP per ton – exposed if costs rise",
-    "Discount cut margin": "Price went down and COP per ton fell",
-    "Margin up without price": "Price flat; COP per ton rose because cost per ton fell",
-    "Margin squeezed – no price increase": "Price flat; cost rose so COP per ton fell",
-    "No change": "Price and COP per ton both roughly flat",
+READINGS = {   # continuing customers; "price flat" = moved less than the minimum price change ($20/t)
+    "Price up, kept as COP": "Price went up and at least 75% of the increase stayed as COP per ton",
+    "Price up, cost took part": "Price went up; cost per ton rose and took 25-75% of the increase",
+    "Price up, cost took almost all": "Price went up but cost per ton rose almost as much - COP per ton barely moved",
+    "Price up, cost rose more": "Price went up but cost per ton rose even more - COP per ton fell",
+    "Price down, cost fell more": "Price went down but cost per ton fell more - COP per ton held or rose",
+    "Price down, COP fell": "Price went down and COP per ton fell",
+    "Price flat, cost fell": "Price about the same; cost per ton fell, so COP per ton rose",
+    "Price flat, cost rose": "Price about the same; cost per ton rose, so COP per ton fell",
+    "No real change": "Price and COP per ton both about the same",
 }
 STATUSES = ["Continuing", "New / regained", "Lost / near-lost", "Small customer"]
 TIERS = ["High", "Mid", "Low", "Loss-making"]
@@ -65,7 +65,7 @@ class Settings:                       # defaults = the workbook's Assumptions sh
     vol_down: float = -0.05           # volume Declining if change <= -5%
     copt_up: float = 10.0             # COP/t Up if change >= +$10/t
     copt_down: float = -10.0          # COP/t Down if change <= -$10/t
-    min_price_change: float = 20.0    # capture only measured if |price change| >= $20/t
+    min_price_change: float = 20.0    # price counts as changed (and capture is measured) only if |change| >= $20/t
     capture_real: float = 0.75
     capture_partly: float = 0.25
     tier_mid: float = 65.0            # margin tier: Mid from $65/t ...
@@ -177,7 +177,7 @@ def customer_table(data: dict, cy: int, py: int, s: Settings) -> pd.DataFrame:
     with np.errstate(divide="ignore", invalid="ignore"):
         t["cop_pct_sales"] = np.where(t[f"sales_{cy}"] != 0, t[f"cop_{cy}"] / t[f"sales_{cy}"], np.nan)
 
-    # Capture and the Price -> COP reading (continuing customers only)
+    # Share of the price change kept as COP per ton ("capture") and the Price -> COP reading (continuing only)
     measurable = cont & (t["dprice"].abs() >= s.min_price_change)
     t["capture"] = np.where(measurable, t["dcopt"] / t["dprice"], np.nan)
     t["reading"] = [_reading(st, i, u, w, s) for st, i, u, w in zip(t["status"], t["dprice"], t["dcopt"], t["capture"])]
@@ -230,17 +230,17 @@ def _reading(st, i, u, w, s: Settings) -> str:
         return ""
     if i >= s.min_price_change:
         if w >= s.capture_real:
-            return "Real margin gain"
+            return "Price up, kept as COP"
         if w >= s.capture_partly:
-            return "Partly cost recovery"
-        return "Cost recovery only" if w >= 0 else "Cost ran ahead of price"
+            return "Price up, cost took part"
+        return "Price up, cost took almost all" if w >= 0 else "Price up, cost rose more"
     if i <= -s.min_price_change:
-        return "Discount covered by cost savings" if u >= 0 else "Discount cut margin"
+        return "Price down, cost fell more" if u >= 0 else "Price down, COP fell"
     if u >= s.copt_up:
-        return "Margin up without price"
+        return "Price flat, cost fell"
     if u <= s.copt_down:
-        return "Margin squeezed – no price increase"
-    return "No change"
+        return "Price flat, cost rose"
+    return "No real change"
 
 
 def margin_tier(copt, s: Settings) -> str:
@@ -401,22 +401,43 @@ def reading_summary(t: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def focus_list(t: pd.DataFrame, n: int = 30) -> pd.DataFrame:
-    f = t[t["at_stake"].notna() & (t["at_stake"] > 0)].sort_values("at_stake", ascending=False).head(n)
+def focus_list(t: pd.DataFrame, cy: int, py: int, fx: float, n: int = 30) -> pd.DataFrame:
+    f = t[t["at_stake"].notna() & (t["at_stake"] > 0)].sort_values("at_stake", ascending=False).head(n).copy()
+    f["stake_how"] = [stake_explained(r, cy, py, fx) for _, r in f.iterrows()]
     return f
 
 
 def cost_risk(t: pd.DataFrame, cy: int, py: int, s: Settings) -> pd.DataFrame:
-    """CY COP if cost/t returned to PY level x (1 + adjust). Customers without PY volume keep their CY COP."""
-    r = t[["customer", "status", "strategy", f"mt_{cy}", f"cop_{cy}", f"cost_{py}", f"cost_{cy}"]].copy()
-    has_py = r[f"cost_{py}"].notna() & (r[f"mt_{cy}"] > 0)
-    scen_cost = r[f"cost_{py}"] * (1 + s.cost_adjust)
-    r["cost_scenario_t"] = np.where(has_py, scen_cost, np.nan)
-    r["cop_scenario"] = np.where(has_py, r[f"cop_{cy}"] - r[f"mt_{cy}"] * (scen_cost - r[f"cost_{cy}"]) * s.fx / 1000,
-                                 r[f"cop_{cy}"])
+    """
+    What-if for CONTINUING customers: keep each customer's CY tons and CY price, but put cost per ton back to its
+    PY level (x (1 + slider)). COP at risk = actual CY COP - COP in that scenario.
+    At slider 0% the total equals the bridge's Cost bar exactly. New, lost and small customers have no reliable PY
+    cost per ton, so they are not part of the scenario (their COP is unchanged).
+    """
+    r = t.loc[t["status"] == "Continuing", ["customer", "strategy", f"mt_{cy}", f"cost_{py}", f"cost_{cy}",
+                                            f"cop_{cy}"]].copy()
+    r["cost_scenario_t"] = r[f"cost_{py}"] * (1 + s.cost_adjust)
+    r["cop_scenario"] = r[f"cop_{cy}"] - r[f"mt_{cy}"] * (r["cost_scenario_t"] - r[f"cost_{cy}"]) * s.fx / 1000
     r["at_risk"] = r[f"cop_{cy}"] - r["cop_scenario"]
-    r["scenario_basis"] = np.where(has_py, "PY cost/t", "no PY volume – CY COP kept")
     return r.sort_values("at_risk", ascending=False)
+
+
+def stake_explained(r: pd.Series, cy: int, py: int, fx: float) -> str:
+    """One line per focus-list customer saying how 'COP at stake' was calculated, with its own numbers."""
+    k = r["strategy_no"]
+    if k == 4:
+        lost_t = r[f"mt_{py}"] - r[f"mt_{cy}"]
+        return (f"Volume lost: {lost_t:,.0f} t × {py} COP per ton {r[f'cop_{py}'] / r[f'mt_{py}']:,.2f} SAR k/t "
+                f"= {r['at_stake']:,.0f}")
+    if k == 7:
+        return f"All the COP they made in {py}: {r['at_stake']:,.0f}"
+    if k == 3:
+        gap = r[f"copt_{py}"] - r[f"copt_{cy}"]
+        return (f"Margin to recover: {r[f'mt_{cy}']:,.0f} t × ${gap:,.0f}/t (back to {py} COP per ton) "
+                f"× {fx} ÷ 1000 = {r['at_stake']:,.0f}")
+    if k == 1:
+        return f"COP gained vs {py}: {r[f'cop_{py}']:,.0f} → {r[f'cop_{cy}']:,.0f} = +{r['at_stake']:,.0f}"
+    return ""
 
 
 def monthly_copt(data: dict, customer: str, fx: float) -> pd.DataFrame:
@@ -439,5 +460,5 @@ def run(data: dict, s: Settings):
     t = finalize(customer_table(data, cy, py, s))
     return {"cy": cy, "py": py, "years": years, "table": t, "kpis": year_kpis(data, s),
             "bridge": bridge(t, cy, py), "strategies": strategy_summary(t, cy, py, s),
-            "readings": reading_summary(t), "focus": focus_list(t), "risk": cost_risk(t, cy, py, s),
+            "readings": reading_summary(t), "focus": focus_list(t, cy, py, s.fx), "risk": cost_risk(t, cy, py, s),
             "merges": merges, "data": data}

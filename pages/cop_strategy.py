@@ -114,9 +114,10 @@ def show():
         vol_down = st.number_input("Volume Declining at ≤ (%)", value=-5.0, step=1.0) / 100
         copt_up = st.number_input("COP/t Up at ≥ ($/t)", value=10.0, step=1.0)
         copt_down = st.number_input("COP/t Down at ≤ ($/t)", value=-10.0, step=1.0)
-        min_price = st.number_input("Min price change to measure capture ($/t)", value=20.0, step=1.0)
-        cap_real = st.number_input("Real margin gain at capture ≥ (%)", value=75.0, step=5.0) / 100
-        cap_part = st.number_input("Partly cost recovery at capture ≥ (%)", value=25.0, step=5.0) / 100
+        min_price = st.number_input("Price counts as changed when it moves ≥ ($/t)", value=20.0, step=1.0)
+        cap_real = st.number_input("'Price up, kept as COP' when ≥ … % of the increase is kept", value=75.0,
+                                   step=5.0) / 100
+        cap_part = st.number_input("'Price up, cost took part' when ≥ … % is kept", value=25.0, step=5.0) / 100
     sb.header("Worth fighting for")
     sb.caption("Worth fighting for = High or Mid margin, **or** a key account.")
     tier_mid = sb.number_input("Mid margin from ($/t)", value=65.0, step=5.0,
@@ -173,6 +174,7 @@ def show():
     tabs = st.tabs(["📊 Overview", "🧭 Strategies", "💲 Price → COP", "📈 Trends", "🎯 Focus list", "⚠️ Cost risk",
                     "🧾 Data check"])
     cols_map = X.customer_columns(cy, py, years)
+    trend_map = {**cols_map, "strategy": f"Strategy ({cy} vs {py})"}
 
     # ════════ Overview ════════
     with tabs[0]:
@@ -252,30 +254,44 @@ def show():
         c = t[t["status"] == "Continuing"].dropna(subset=["dprice", "dcopt"])
         cap = 400
         fig = go.Figure()
-        for r_, color in zip(L.READINGS, [GREEN, "#4C956C", GOLD, RED, "#457B9D", "#8E5572", "#2E8449", "#BC6C25", GREY]):
-            x = c[c["reading"] == r_]
+        outcome = [("Up", f"COP per ton up (≥ +${s.copt_up:,.0f}/t)", GREEN),
+                   ("Flat", "COP per ton about the same", GREY),
+                   ("Down", f"COP per ton down (≤ −${-s.copt_down:,.0f}/t)", RED)]
+        for move, name, color in outcome:
+            x = c[c["copt_move"] == move]
             if x.empty:
                 continue
-            fig.add_trace(go.Scatter(x=x["dprice"].clip(-cap, cap), y=x["dcopt"].clip(-cap, cap), mode="markers",
-                                     name=r_, marker=dict(color=color, size=8, opacity=0.8), text=x["customer"],
-                                     hovertemplate="%{text}<br>Price Δ %{x:,.0f} $/t<br>COP/t Δ %{y:,.0f} $/t<extra></extra>"))
-        fig.add_trace(go.Scatter(x=[-cap, cap], y=[-cap, cap], mode="lines", name="100% capture",
+            fig.add_trace(go.Scatter(
+                x=x["dprice"].clip(-cap, cap), y=x["dcopt"].clip(-cap, cap), mode="markers", name=name,
+                marker=dict(color=color, size=8, opacity=0.8), customdata=x[["customer", "reading"]].values,
+                hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]}<br>Price Δ %{x:,.0f} $/t"
+                              "<br>COP per ton Δ %{y:,.0f} $/t<extra></extra>"))
+        fig.add_trace(go.Scatter(x=[-cap, cap], y=[-cap, cap], mode="lines", name="Cost per ton unchanged",
                                  line=dict(color=NAVY, dash="dash")))
-        fig.update_layout(height=520, plot_bgcolor="white", xaxis_title="Price change ($/t)",
-                          yaxis_title="COP per ton change ($/t)", legend=dict(orientation="h", y=-0.2),
+        for x_, y_, txt in ((-cap * 0.45, cap * 0.85, "Above the dotted line:<br><b>cost per ton fell</b>"),
+                            (cap * 0.70, cap * 0.22, "Below the dotted line:<br><b>cost per ton rose</b>"),
+                            (0, -cap * 0.88, "Below zero: <b>COP per ton fell</b>"),
+                            (cap * 0.80, cap * 0.95, "Dotted line: every $1 of price<br>became $1 of COP per ton")):
+            fig.add_annotation(x=x_, y=y_, text=txt, showarrow=False, font=dict(size=12, color=NAVY),
+                               bgcolor="rgba(255,255,255,0.8)")
+        fig.update_layout(height=560, plot_bgcolor="white", xaxis_title="Price per ton change ($/t)",
+                          yaxis_title="COP per ton change ($/t)", legend=dict(orientation="h", y=-0.18),
                           margin=dict(l=10, r=10, t=30, b=10))
-        fig.update_xaxes(gridcolor="#EEEEEE", zeroline=True, zerolinecolor=GREY)
-        fig.update_yaxes(gridcolor="#EEEEEE", zeroline=True, zerolinecolor=GREY)
+        fig.update_xaxes(gridcolor="#EEEEEE", zeroline=True, zerolinecolor="#6B7280", zerolinewidth=1.5,
+                         range=[-cap * 1.05, cap * 1.05])
+        fig.update_yaxes(gridcolor="#EEEEEE", zeroline=True, zerolinecolor="#6B7280", zerolinewidth=1.5,
+                         range=[-cap * 1.05, cap * 1.05])
         st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"Continuing customers, values capped at ±{cap} $/t for readability. On the dashed line, every $1 "
-                   "of price became $1 of COP per ton.")
+        st.caption(f"Each dot is a continuing customer, {cy} vs {py}. Hover a dot to see the customer and its reading. "
+                   f"Values beyond ±{cap} $/t are shown at the edge. Readings are per customer, so a customer that "
+                   "switched to more expensive boxes can show a price change without a real price increase.")
         rd = R["readings"].rename(columns={"reading": "Reading", "customers": "Customers", "avg_dprice": "Avg price Δ $/t",
                                            "avg_dcopt": "Avg COP/t Δ $/t", "dcop": "ΔCOP", "price": "of which price",
                                            "cost": "of which cost", "meaning": "Meaning"})
         st.dataframe(rd, hide_index=True, use_container_width=True, column_config={
             c_: st.column_config.NumberColumn(c_, format="%,.0f") for c_ in rd.columns if c_ not in ("Reading", "Meaning")})
-        st.subheader("Discounts that cut margin")
-        dm = view[view["reading"] == "Discount cut margin"]
+        st.subheader("Price down, COP fell")
+        dm = view[view["reading"] == "Price down, COP fell"]
         cols = ["customer", "strategy", f"mt_{cy}", "dprice", "dcopt", f"cop_{py}", f"cop_{cy}", "dcop"]
         st.dataframe(dm[cols].sort_values("dcop").rename(columns=cols_map), hide_index=True, use_container_width=True,
                      column_config=_num_cfg(cols_map, cols))
@@ -286,7 +302,7 @@ def show():
         tr = view[~view["trend"].str.startswith("Not active")].copy()
         tr["COP by year"] = tr[[f"cop_{y}" for y in years]].values.tolist()
         cols = ["customer", "trend", "COP by year"] + [f"cop_{y}" for y in years] + ["strategy"]
-        st.dataframe(tr[cols].rename(columns=cols_map), hide_index=True, use_container_width=True,
+        st.dataframe(tr[cols].rename(columns=trend_map), hide_index=True, use_container_width=True,
                      column_config={**_num_cfg(cols_map, cols),
                                     "COP by year": st.column_config.LineChartColumn("COP by year")})
         st.caption(f"Customers with ≥ {s.min_mt:,.1f} MT in every uploaded year. Label = direction of COP over the last "
@@ -294,8 +310,10 @@ def show():
         st.subheader(f"Momentum: last {s.recent_months} months of {cy} vs the same months of {py}")
         mo = view[view["momentum"] != ""]
         cols = ["customer", "momentum", "recent_copt_py", "recent_copt_cy", "strategy"]
-        st.dataframe(mo[cols].rename(columns=cols_map), hide_index=True, use_container_width=True,
+        st.dataframe(mo[cols].rename(columns=trend_map), hide_index=True, use_container_width=True,
                      column_config=_num_cfg(cols_map, cols))
+        st.caption(f"The strategy column is the same as on the Strategies tab: it compares {cy} with {py} only, so it "
+                   "can differ from the multi-year trend.")
         st.subheader("Monthly COP per ton")
         who = st.selectbox("Customer", view["customer"].tolist() or t["customer"].tolist(), help="Type to search.")
         mc = L.monthly_copt(data, who, s.fx)
@@ -312,16 +330,27 @@ def show():
 
     # ════════ Focus list ════════
     with tabs[4]:
-        st.caption("Top 30 customers by COP at stake (SAR k): Defend = −volume effect · Win back = PY COP · "
-                   "Raise price = MT CY × max(0, COP/t PY − COP/t CY) · Grow = positive ΔCOP.")
-        fl = L.focus_list(view)
+        st.markdown(f"""
+**Top 30 customers by COP at stake** (SAR k): how much COP each one is worth acting on.
+
+| Strategy | COP at stake = |
+|---|---|
+| **Defend** | the COP lost because they bought fewer tons: tons lost × their {py} COP per ton |
+| **Win back** | all the COP they made in {py} |
+| **Raise price** | {cy} tons × the COP per ton needed to get back to their {py} level |
+| **Grow** | the COP they added vs {py} |
+
+Each row's own calculation is in the column **How it's calculated**.
+""")
+        fl = L.focus_list(view, cy, py, s.fx)
         notes = st.session_state.setdefault("cop_focus_notes", {})
-        cols = ["customer", "strategy", "at_stake", f"cop_{py}", f"cop_{cy}", "dcop", "momentum"]
-        fe = fl[cols].rename(columns=cols_map).copy()
+        cols = ["customer", "strategy", "at_stake", "stake_how", f"cop_{py}", f"cop_{cy}", "dcop", "momentum"]
+        fe = fl[cols].rename(columns={**cols_map, "stake_how": "How it's calculated"}).copy()
         for c_ in FOCUS_EDIT_COLS:
             fe[c_] = [notes.get(n, {}).get(c_, "") for n in fl["customer"]]
         edited = st.data_editor(fe, hide_index=True, use_container_width=True,
-                                disabled=[cols_map[c_] for c_ in cols], key="cop_focus_ed",
+                                disabled=[{**cols_map, "stake_how": "How it's calculated"}[c_] for c_ in cols],
+                                key="cop_focus_ed",
                                 column_config=_num_cfg(cols_map, cols))
         for _, r in edited.iterrows():
             notes[r["Customer"]] = {c_: r[c_] for c_ in FOCUS_EDIT_COLS}
@@ -331,20 +360,38 @@ def show():
     # ════════ Cost risk ════════
     with tabs[5]:
         rk = R["risk"]
-        tot_cy, tot_sc = rk[f"cop_{cy}"].sum(), rk["cop_scenario"].sum()
+        b = R["bridge"]
+        at_risk = rk["at_risk"].sum()
+        gain = b["cop_cy"] - b["cop_py"]
+        st.markdown(f"""
+**Question:** how much of this year's COP depends on costs per ton being lower than last year?
+
+**What-if:** for every continuing customer, keep their {cy} tons and {cy} price, but put their cost per ton back to
+their {py} level{f' {s.cost_adjust:+.0%}' if s.cost_adjust else ''} (slider in the sidebar).
+""")
         a, b_, c_ = st.columns(3)
-        a.metric(f"{cy} COP (actual)", _fmt_k(tot_cy))
-        b_.metric(f"{cy} COP if cost/t = {py} level {s.cost_adjust:+.0%}", _fmt_k(tot_sc))
-        c_.metric("Depends on lower costs", _fmt_k(tot_cy - tot_sc),
-                  f"{(tot_cy - tot_sc) / (tot_cy - R['bridge']['cop_py']):.0%} of the {cy} COP gain"
-                  if tot_cy != R["bridge"]["cop_py"] else None, delta_color="off")
-        st.caption(f"Each customer's {cy} volume and price kept; cost per ton set back to its {py} level "
-                   f"{s.cost_adjust:+.0%} (slider in the sidebar). Customers with no {py} volume keep their {cy} COP.")
+        a.metric(f"{cy} COP (actual)", _fmt_k(b["cop_cy"]))
+        b_.metric(f"{cy} COP if cost per ton = {py} level" + (f" {s.cost_adjust:+.0%}" if s.cost_adjust else ""),
+                  _fmt_k(b["cop_cy"] - at_risk))
+        c_.metric("COP that depends on lower cost", _fmt_k(at_risk),
+                  f"{at_risk / gain:.0%} of the {cy} COP gain ({gain:,.0f})" if gain else None, delta_color="off")
+        ex = rk.iloc[0] if len(rk) else None
+        if ex is not None:
+            st.caption(f"Example - {ex['customer']}: {ex[f'mt_{cy}']:,.0f} t × (scenario cost "
+                       f"{ex['cost_scenario_t']:,.0f} − actual {cy} cost {ex[f'cost_{cy}']:,.0f} $/t) × {s.fx} ÷ 1000 "
+                       f"= {ex['at_risk']:,.0f} SAR k of COP at risk. "
+                       + (f"At 0% on the slider the total equals the Cost bar of the bridge ({b['cost']:,.0f}). "
+                          if not s.cost_adjust else "")
+                       + "New, lost and small customers have no reliable last-year cost per ton, so they are not "
+                         "part of this what-if.")
         rv = rk[rk["customer"].isin(view["customer"])]
-        cols = ["customer", "strategy", f"mt_{cy}", f"cost_{py}", f"cost_{cy}", "cost_scenario_t", f"cop_{cy}",
-                "cop_scenario", "at_risk", "scenario_basis"]
-        rmap = {**cols_map, "cost_scenario_t": "Scenario cost $/t", "cop_scenario": f"{cy} COP in scenario",
-                "at_risk": "COP at risk", "scenario_basis": "Basis"}
+        cols = ["customer", "strategy", f"mt_{cy}", f"cost_{py}", f"cost_{cy}"]
+        if s.cost_adjust:
+            cols.append("cost_scenario_t")
+        cols += [f"cop_{cy}", "cop_scenario", "at_risk"]
+        rmap = {**cols_map, "cost_scenario_t": f"Cost $/t in what-if ({py} {s.cost_adjust:+.0%})",
+                f"cop_{cy}": f"COP {cy} actual (SAR k)", "cop_scenario": f"COP {cy} if cost back to {py} level",
+                "at_risk": "COP that depends on lower cost"}
         st.dataframe(rv[cols].rename(columns=rmap), hide_index=True, use_container_width=True,
                      column_config=_num_cfg(rmap, cols))
 
@@ -381,7 +428,8 @@ def show():
 
     # ── Export ──
     cust = t[list(cols_map)].rename(columns=cols_map)
-    focus = L.focus_list(t)[["customer", "strategy", "at_stake", f"cop_{py}", f"cop_{cy}", "dcop"]].rename(columns=cols_map)
+    focus = L.focus_list(t, cy, py, s.fx)[["customer", "strategy", "at_stake", "stake_how", f"cop_{py}", f"cop_{cy}",
+                                           "dcop"]].rename(columns={**cols_map, "stake_how": "How it's calculated"})
     notes = st.session_state.get("cop_focus_notes", {})
     for c_ in FOCUS_EDIT_COLS:
         focus[c_] = [notes.get(n, {}).get(c_, "") for n in focus["Customer"]]
@@ -396,9 +444,10 @@ def show():
                                           b["small"], b["cop_cy"], b["check"]]}),
         "Strategies": st_tbl, "Customers": cust, "Price-COP readings": rd, "Focus list": focus,
         "Merged names": R["merges"].rename(columns={"shown_as": "Shown as", "names_merged": "Names merged"}),
-        "Cost risk": R["risk"].rename(columns=rmap)[[rmap[c_] for c_ in ["customer", "strategy", f"mt_{cy}", f"cost_{py}",
-                                                                        f"cost_{cy}", "cost_scenario_t", f"cop_{cy}",
-                                                                        "cop_scenario", "at_risk", "scenario_basis"]]],
+        "Cost risk": R["risk"].rename(columns={**cols_map, "cost_scenario_t": f"Cost $/t in what-if ({py} {s.cost_adjust:+.0%})",
+                                               f"cop_{cy}": f"COP {cy} actual (SAR k)",
+                                               "cop_scenario": f"COP {cy} if cost back to {py} level",
+                                               "at_risk": "COP that depends on lower cost"}),
         "Settings": pd.DataFrame([{"Setting": k_, "Value": str(v)} for k_, v in vars(s).items() if k_ != "actions"]),
     }
     st.download_button("⬇️ Download all tables (.xlsx)", X.build_workbook(sheets),
